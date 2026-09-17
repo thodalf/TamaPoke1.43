@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TamaPoke · Installer</title>
+<style>
+  :root { --bg:#f2efe1; --ink:#2a2a36; --accent:#4f93c4; --ok:#58b868; --bad:#e8503a; --track:#d8d2bd; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, sans-serif; background:var(--bg);
+         color:var(--ink); line-height:1.6; }
+  .wrap { max-width: 680px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  h1 { font-size: 2rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.25rem; margin: 2.5rem 0 .5rem; }
+  .sub { color:#6b6b76; margin: 0 0 1.5rem; }
+  .step { background:#fff; border:1px solid var(--track); border-radius:14px; padding:1.25rem 1.5rem; margin: 1rem 0; }
+  .num { display:inline-flex; width:26px; height:26px; border-radius:50%; background:var(--accent); color:#fff;
+         align-items:center; justify-content:center; font-weight:600; margin-right:.5rem; font-size:.9rem; }
+  button { font: inherit; font-weight:500; padding:.6rem 1.2rem; border-radius:10px; border:1px solid var(--ink);
+           background:#fff; cursor:pointer; }
+  button:hover { background:var(--bg); }
+  button:disabled { opacity:.5; cursor:default; }
+  esp-web-install-button { display:inline-block; }
+  esp-web-install-button[install-unsupported] { display:none; }
+  .unsupported { display:none; color:var(--bad); font-weight:500; }
+  .row { display:flex; gap:.75rem; align-items:center; flex-wrap:wrap; }
+  #log { font-family: ui-monospace, monospace; font-size:.85rem; background:#1b1b25; color:#d8dcf0;
+         border-radius:10px; padding:.75rem 1rem; margin-top:1rem; max-height:220px; overflow:auto; white-space:pre-wrap; display:none; }
+  .bar { height:10px; background:var(--track); border-radius:5px; overflow:hidden; margin-top:.75rem; display:none; }
+  .bar > div { height:100%; width:0; background:var(--ok); transition: width .15s; }
+  code { background:#0001; padding:.1em .4em; border-radius:5px; }
+  a { color:var(--accent); }
+  .note { font-size:.9rem; color:#6b6b76; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🐢 TamaPoke</h1>
+  <p class="sub">A 386-Pokémon tamagotchi for the Waveshare ESP32-S3-Touch-AMOLED-1.75.
+     Install it from your browser — no Arduino, no drivers.</p>
+
+  <p class="unsupported" id="unsupported">
+    ⚠️ Your browser doesn't support Web Serial. Use <b>Chrome</b> or <b>Edge</b> on a computer.
+  </p>
+
+  <div class="step" style="border-left:4px solid #e8503a;background:#fff6f4">
+    <p><b>⚠️ Board not showing up? Read this first — it is almost always this.</b></p>
+    <p>A brand-new board <b>does not appear as a serial port at all</b>. The firmware it
+       ships with never switches USB on, so your computer sees nothing and it looks like a
+       dead board or a broken cable. It is neither. Put it in <b>download mode</b>:</p>
+    <p style="font-size:1.05em"><b>hold BOOT&nbsp;→ tap RESET&nbsp;→ let go of BOOT</b></p>
+    <p class="note">The two small buttons next to the USB-C socket. Nothing on screen will
+       change — that is normal. Now press install and the port will be there.
+       After TamaPoke is on it, this is never needed again.</p>
+    <p class="note">Still nothing? Use a cable that carries <b>data</b> (a charge-only USB-C
+       cable powers the board perfectly and carries nothing), and plug <b>straight into your
+       computer</b> rather than through a hub.</p>
+  </div>
+
+  <h2><span class="num">1</span>Flash the firmware</h2>
+  <div class="step">
+    <p>Plug the board in via USB and press install. Pick the port and wait.
+       Takes about a minute. No drivers needed on any OS.</p>
+    <esp-web-install-button manifest="manifest.json">
+      <button slot="activate">⚡ Install TamaPoke</button>
+      <span slot="unsupported">Browser not supported (use Chrome/Edge).</span>
+      <span slot="not-allowed">Needs HTTPS.</span>
+    </esp-web-install-button>
+    <p class="note" style="border-left:4px solid #e8503a;padding-left:10px">
+       🔄 <b>Updating? Leave "Erase device" unchecked.</b> The installer asks
+       once, with the box already unchecked — click <b>Next</b> without ticking
+       it and your creature, Pokédex and badges all survive, because the
+       firmware is written around the save rather than over it. Tick that box
+       and everything is gone, with no undo. The sprites on the microSD are
+       untouched either way.<br><br>
+       <b>Installers before v2.7 erased it every time, without asking.</b>
+       They shipped one image covering the whole start of flash, the save
+       included, and were configured to wipe the chip before writing. Both are
+       fixed here. Even so, <code>EXPORT</code> on the serial console is the
+       only real safety net: it prints your whole save as a block of
+       <code>IMPORT</code> lines, and pasting that block back restores it.
+       Worth doing before any update you care about.<br><br>
+       A fresh board with nothing on it can be erased safely, and on a board
+       that has never run TamaPoke it makes no difference either way.</p>
+  </div>
+
+  <h2><span class="num">2</span>Load the sprites onto the microSD</h2>
+  <div class="step">
+    <p>Put a microSD into the board (it formats itself). Press <b>Connect board</b>,
+       then a region. Any one of them works on its own — pick Johto or Hoenn if
+       that is the game you want — and the others can be added later without
+       redoing this one. Kanto is simply the usual place to start.</p>
+    <p class="note">⏱️ <b>This part is slow, and that is normal.</b> The sprites go over
+       the USB serial link, so Kanto's 40 MB takes roughly <b>10–15 minutes</b>. Leave the
+       tab open and the card in. The progress bar moves the whole time.</p>
+    <p class="note">Close the step-1 install tab first (only one program can use
+       the port at a time).</p>
+    <div class="row">
+      <button id="connect">🔌 Connect board</button>
+      <button id="auto" data-region="kanto" disabled>⬇️ Kanto sprites (~40 MB)</button>
+      <button id="autoj" data-region="johto" disabled>⬇️ Johto (~27 MB)</button>
+      <button id="autoh" data-region="hoenn" disabled>⬇️ Hoenn (~38 MB)</button>
+      <button id="autos" data-region="sinnoh" disabled>⬇️ Sinnoh (~33 MB)</button>
+      <button id="autou" data-region="unova" disabled>⬇️ Unova (~40 MB)</button>
+      <button id="autok" data-region="kalos" disabled>⬇️ Kalos (~21 MB)</button>
+      <button id="autoa" data-region="alola" disabled>⬇️ Alola (~24 MB)</button>
+    </div>
+    <p class="note">Have your own <code>.bin</code> files? <label style="cursor:pointer;text-decoration:underline">pick them manually<input id="files" type="file" accept=".bin" multiple disabled hidden></label></p>
+    <p class="note">🎨 Want to make your own sprites? See <a href="https://github.com/DylanPDao/TamaPoke#generate-and-load-the-sprites-yourself" target="_blank">how to generate &amp; load them</a> in the repo.</p>
+    <div class="bar" id="bar"><div></div></div>
+    <pre id="log"></pre>
+  </div>
+
+  <h2>How to play</h2>
+  <p>Care for your egg until it hatches, feed it, play, train it and complete them
+     all. Tap the creature to pet it; swipe to open the Pokédex (sideways), the
+     stat card (up) or set the clock (down); the physical PWR button turns the
+     screen off (short press) or everything off (long press).
+     More in the <a href="https://github.com/DylanPDao/TamaPoke" target="_blank">repository</a>.</p>
+  <p class="note">TamaPoke was created by <b>Quique Tortosa</b> —
+     <a href="https://github.com/socquique/TamaPoke" target="_blank">socquique/TamaPoke</a>.
+     This is a fork that builds on his work.</p>
+
+  <p class="note">Sprites from <a href="https://github.com/PMDCollab/SpriteCollab" target="_blank">PMD SpriteCollab</a> (CC BY-NC).
+     Pokémon is a ™ of Nintendo / Game Freak. Non-commercial project.</p>
+</div>
+
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js"></script>
+<script>
+const log = (m) => { const el = document.getElementById('log'); el.style.display='block';
+  el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
+const supported = 'serial' in navigator;
+if (!supported) { document.getElementById('unsupported').style.display='block';
+  document.getElementById('connect').disabled = true; }
+
+let port, reader, writer, lineBuf = '';
+
+async function readLine(timeoutMs = 6000) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const nl = lineBuf.indexOf('\n');
+    if (nl >= 0) { const l = lineBuf.slice(0, nl).trim(); lineBuf = lineBuf.slice(nl + 1); return l; }
+    if (Date.now() > deadline) return null;
+    const { value, done } = await reader.read();
+    if (done) return null;
+    lineBuf += new TextDecoder().decode(value);
+  }
+}
+
+async function waitFor(token, timeoutMs = 6000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const l = await readLine(deadline - Date.now());
+    if (l === null) return false;
+    if (l === token) return true;
+    if (l === 'ERR') return false;
+  }
+  return false;
+}
+
+const enc = new TextEncoder();
+
+// sends one file to the board with the PUT protocol (name includes the mons/ prefix)
+async function sendOne(name, data) {
+  await writer.write(enc.encode(`PUT ${name} ${data.length}\n`));
+  if (!await waitFor('OK')) return false;
+  for (let i = 0; i < data.length; i += 2048) {
+    await writer.write(data.slice(i, i + 2048));
+    if (!await waitFor('#')) return false;
+  }
+  return await waitFor('DONE', 30000);
+}
+
+// splits the sprites.pak bundle (TPAK) into its individual files
+function parsePak(buf) {
+  const dv = new DataView(buf), td = new TextDecoder();
+  if (td.decode(new Uint8Array(buf, 0, 4)) !== 'TPAK') throw new Error('invalid bundle');
+  const count = dv.getUint16(4, true);
+  let off = 6; const items = [];
+  for (let i = 0; i < count; i++) {
+    const nl = dv.getUint8(off); off += 1;
+    const name = td.decode(new Uint8Array(buf, off, nl)); off += nl;
+    const size = dv.getUint32(off, true); off += 4;
+    items.push({ name, size });
+  }
+  let pos = off;
+  for (const it of items) { it.data = new Uint8Array(buf, pos, it.size); pos += it.size; }
+  return items;
+}
+
+async function sendAll(items) {
+  const bar = document.getElementById('bar'); bar.style.display = 'block';
+  const fill = bar.firstElementChild;
+  let done = 0, fail = 0;
+  for (const it of items) {
+    if (!await sendOne(it.name, it.data)) { log('   failed ' + it.name); fail++; }
+    done++;
+    fill.style.width = (done / items.length * 100) + '%';
+  }
+  log(`Done (${done - fail}/${items.length}). Restart the board (PWR button).`);
+}
+
+document.getElementById('connect').onclick = async () => {
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    reader = port.readable.getReader();
+    writer = port.writable.getWriter();
+    lineBuf = '';
+    log('Connected. Press "Load sprites".');
+    for (const b of document.querySelectorAll('[data-region]')) b.disabled = false;
+    document.getElementById('files').disabled = false;
+    probeRegions();      // grey out any region that has no bundle to download
+    document.getElementById('connect').disabled = true;
+  } catch (e) { log('Could not connect: ' + e.message); }
+};
+
+// One bundle per region. Kanto alone is ~40 MB and all three would be ~100 MB,
+// which is GitHub's hard per-file limit -- so they are separate files, and a
+// player can take Kanto and stop, or add a region later without re-sending what
+// is already on the card.
+// Where the bundles live. They are NOT committed: each is ~40 MB, and putting
+// them in the repo would make every clone of a firmware project carry 100+ MB of
+// sprites forever. A GitHub Release hosts them outside the git history, and its
+// downloads send Access-Control-Allow-Origin, so fetch() from Pages works.
+//
+// Same origin is tried first anyway, so `python3 -m http.server` in web/ with the
+// paks sitting there works for local testing without touching this.
+const PAK_RELEASE = 'https://github.com/DylanPDao/TamaPoke/releases/latest/download';
+
+function pakUrls(region) {
+  return [`sprites-${region}.pak`, `${PAK_RELEASE}/sprites-${region}.pak`];
+}
+
+async function fetchPak(region) {
+  let last;
+  for (const url of pakUrls(region)) {
+    try {
+      const resp = await fetch(url);
+      if (resp.ok) return await resp.arrayBuffer();
+      last = new Error('HTTP ' + resp.status);
+    } catch (e) { last = e; }
+  }
+  throw last || new Error('not found');
+}
+
+// HEAD, not a ranged GET: a ranged GET against a server that ignores Range --
+// python's http.server does -- starts streaming all 40 MB just to find out the
+// file exists. HEAD sends headers only, and both a local server and GitHub
+// releases support it.
+// A region whose sprites have not been packed yet should not present a button
+// that can only fail -- "Failed to fetch" means nothing to somebody installing
+// this for the first time.
+async function probeRegions() {
+  for (const b of document.querySelectorAll('[data-region]')) {
+    const region = b.dataset.region;
+    let found = false;
+    for (const url of pakUrls(region)) {
+      try {
+        const r = await fetch(url, { method: 'HEAD' });
+        if (r.ok) { found = true; break; }
+      } catch (e) { /* try the next */ }
+    }
+    if (!found) {
+      b.disabled = true;
+      b.textContent = b.textContent.replace(/^⬇️ /, '') .replace(/ \(.*\)$/, '') + ' — not published yet';
+      b.title = 'No sprite bundle exists for this region yet. See web/README.md.';
+    }
+  }
+}
+
+async function loadRegion(btn) {
+  const region = btn.dataset.region;
+  if (!writer) { log('Connect the board first.'); return; }
+  btn.disabled = true;
+  log(`Downloading the ${region} sprite bundle (this is the slow part)...`);
+  let items;
+  try {
+    items = parsePak(await fetchPak(region));
+  } catch (e) {
+    log(`Could not download the ${region} bundle: ` + e.message);
+    log(`If this repo has no release yet, that is why -- see web/README.md.`);
+    btn.disabled = false;
+    return;
+  }
+  log(`${items.length} ${region} sprites. Sending over USB...`);
+  await sendAll(items);
+  log(`${region} done. You can load another region, or stop here.`);
+}
+// Driven off the markup, so adding a region is ONE new button and nothing
+// else. This was three separate hardcoded id lists.
+for (const b of document.querySelectorAll('[data-region]')) b.onclick = () => loadRegion(b);
+
+document.getElementById('files').onchange = async (ev) => {
+  const files = [...ev.target.files];
+  const items = [];
+  for (const f of files) items.push({ name: 'mons/' + f.name, data: new Uint8Array(await f.arrayBuffer()) });
+  log(`${items.length} files. Sending...`);
+  await sendAll(items);
+};
+</script>
+</body>
+</html>

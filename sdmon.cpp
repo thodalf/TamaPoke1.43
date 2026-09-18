@@ -3,19 +3,38 @@
 #include "pin_config.h"
 #include "pet.h"   // gRegionArt, REGIONS -- the mask this narrows
 #include <FS.h>
+
+#if defined(TAMAPOKE_SD_NATIVE_SDMMC)
+// 1.75: pines propios, protocolo SD nativo (SD_MMC), verificado en placa.
+#include <SD_MMC.h>
+#define SDCARD SD_MMC
+#else
+// 1.43 (pines propios) y 2.8" redonda (bus compartido con el init del LCD):
+// SD por SPI en ambos casos -- ver sdBegin().
 #include <SD.h>
 #include <SPI.h>
-
-// PORTAGE 1.43: pin_config.h ya documentaba que esta ranura TF esta cableada
-// en SPI dedicado (CLK/CMD=MOSI/DATA=MISO/CS), no en SDMMC 4-bit -- pero el
-// codigo seguia usando SD_MMC (protocolo nativo SD sobre el periferico SDMMC
-// del chip), que nunca puede hablar con un socket cableado para SPI: el
-// nativo no usa CS en absoluto, y aqui SDMMC_CS estaba definido pero sin uso.
-// Sintoma en el board real: "sdmmc_init_ocr: send_op_cond (1) returned
-// 0x107" (ESP_ERR_TIMEOUT) -- la tarjeta nunca responde al protocolo nativo.
-// Bus SPI propio (no el mismo que la pantalla) para no compartir cola de
-// transacciones con el framebuffer QSPI.
+#define SDCARD SD
+#if defined(TAMAPOKE_SD_SPI_DEDICATED)
+// 1.43: pines propios, cableados en SPI dedicado (no SDMMC 4-bit). Bus SPI
+// propio (no el mismo que la pantalla) para no compartir cola de
+// transacciones con el framebuffer QSPI. Sintoma cuando esto usaba SD_MMC en
+// vez de SPI: "sdmmc_init_ocr: send_op_cond (1) returned 0x107"
+// (ESP_ERR_TIMEOUT) -- la tarjeta nunca responde al protocolo nativo sobre
+// pines cableados para SPI.
 static SPIClass sdSPI(HSPI);
+#elif defined(TAMAPOKE_SD_SPI_SHARED_LCD)
+// 2.8" redonda, NUNCA PROBADA EN PLACA (ver PORTAGE_28ROUND.md): el esquematico
+// comparte MOSI/SCK con el sub-bus de 3 hilos del init del ST7701 (mismo
+// SPI2_HOST -- ver st7701Init(), que libera el bus con spi_bus_free() al
+// terminar para que esta clase pueda reclamarlo). El CS de la SD va detras
+// del expansor TCA9554 (EXIO_SD_CS), no en un GPIO que SPIClass pueda manejar
+// solo -- se deja PERMANENTEMENTE seleccionado en sdBegin() y se le pasa un
+// numero de pin invalido a SD.begin() para que no intente tocar ningun CS
+// por su cuenta.
+static SPIClass sdSPI(FSPI);
+#include "tca9554.h"
+#endif
+#endif
 
 bool sdReady = false;
 bool sdDirty = false;
@@ -33,10 +52,10 @@ bool PmdMon::load(int16_t dexNum, bool shiny) {
 
   char path[28];
   snprintf(path, sizeof(path), "/mons/p%s%03u.bin", shiny ? "s" : "", (unsigned)dexNum);
-  File f = SD.open(path, FILE_READ);
+  File f = SDCARD.open(path, FILE_READ);
   if (!f && shiny) {  // sin shiny PMD: usa el normal
     snprintf(path, sizeof(path), "/mons/p%03u.bin", (unsigned)dexNum);
-    f = SD.open(path, FILE_READ);
+    f = SDCARD.open(path, FILE_READ);
   }
   if (!f) return false;
 
@@ -107,7 +126,7 @@ void PmdMon::unload() {
 
 bool SdThumbs::load() {
   if (!sdReady) return false;
-  File f = SD.open("/mons/thumbs.bin", FILE_READ);
+  File f = SDCARD.open("/mons/thumbs.bin", FILE_READ);
   if (!f) {
     Serial.println("sin thumbs.bin (galeria sin miniaturas)");
     return false;
@@ -155,7 +174,7 @@ void sdScanRegionArt(bool verbose) {
     for (int i = 0; i < 3 && all; i++) {
       char path[28];
       snprintf(path, sizeof(path), "/mons/p%03u.bin", (unsigned)probe[i]);
-      File f = SD.open(path, FILE_READ);
+      File f = SDCARD.open(path, FILE_READ);
       if (!f) all = false; else f.close();
     }
     if (all) mask |= (uint16_t)(1u << r);
@@ -166,11 +185,21 @@ void sdScanRegionArt(bool verbose) {
 }
 
 bool sdBegin() {
+#if defined(TAMAPOKE_SD_NATIVE_SDMMC)
+  SDCARD.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_DATA);
+  sdReady = SDCARD.begin("/sdcard", true /* modo 1-bit */, true /* formatea si no monta */);
+#elif defined(TAMAPOKE_SD_SPI_DEDICATED)
   sdSPI.begin(SDMMC_CLK, SDMMC_DATA /* MISO */, SDMMC_CMD /* MOSI */, SDMMC_CS);
-  sdReady = SD.begin(SDMMC_CS, sdSPI, 4000000, "/sdcard", 5, true /* formatea si no monta */);
+  sdReady = SDCARD.begin(SDMMC_CS, sdSPI, 4000000, "/sdcard", 5, true /* formatea si no monta */);
+#elif defined(TAMAPOKE_SD_SPI_SHARED_LCD)
+  tca9554Write(EXIO_SD_CS, false);  // seleccionada de forma permanente, ver arriba
+  sdSPI.begin(SDMMC_CLK, SDMMC_DATA /* MISO */, SDMMC_CMD /* MOSI */, -1);
+  sdReady = SDCARD.begin(255 /* CS ya fijo por el expansor, ningun GPIO real */,
+                         sdSPI, 4000000, "/sdcard", 5, true /* formatea si no monta */);
+#endif
   if (sdReady) {
-    Serial.printf("SD montada: %llu MB\n", SD.cardSize() / (1024ULL * 1024ULL));
-    SD.mkdir("/mons");
+    Serial.printf("SD montada: %llu MB\n", SDCARD.cardSize() / (1024ULL * 1024ULL));
+    SDCARD.mkdir("/mons");
     sdScanRegionArt();
   } else {
     Serial.println("SD no detectada (el juego usa los sprites de flash)");
@@ -185,10 +214,10 @@ bool SdMon::load(int16_t dexNum, bool shiny) {
 
   char path[24];
   snprintf(path, sizeof(path), "/mons/%s%03u.bin", shiny ? "s" : "", (unsigned)dexNum);
-  File f = SD.open(path, FILE_READ);
+  File f = SDCARD.open(path, FILE_READ);
   if (!f && shiny) {  // sin variante shiny: usa la normal
     snprintf(path, sizeof(path), "/mons/%03u.bin", (unsigned)dexNum);
-    f = SD.open(path, FILE_READ);
+    f = SDCARD.open(path, FILE_READ);
   }
   if (!f) {
     Serial.printf("no existe %s\n", path);
@@ -268,7 +297,7 @@ bool sdSerialCommand(const String &line) {
       return true;
     }
     if (!path.startsWith("/")) path = "/" + path;
-    File f = SD.open(path, FILE_WRITE);
+    File f = SDCARD.open(path, FILE_WRITE);
     if (!f) {
       Serial.println("ERR");
       return true;
@@ -296,7 +325,7 @@ bool sdSerialCommand(const String &line) {
     Serial.println(remaining == 0 ? "DONE" : "ERR");
     return true;
   } else if (line == "LS") {
-    File dir = SD.open("/mons");
+    File dir = SDCARD.open("/mons");
     if (dir) {
       File e;
       while ((e = dir.openNextFile())) {

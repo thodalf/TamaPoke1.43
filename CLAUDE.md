@@ -1,6 +1,14 @@
 # TamaPoke
 
-Gen-1-Pokémon tamagotchi firmware for the **Waveshare ESP32-S3-Touch-AMOLED-1.75**.
+Gen-1-Pokémon tamagotchi firmware, MULTI-BOARD: **Waveshare
+ESP32-S3-Touch-AMOLED-1.75**, **ESP32-S3-Touch-AMOLED-1.43**, and (untested,
+best-effort) **ESP32-S3-Touch-LCD-2.8C** (round RGB565). Pick the target in
+`board_select.h`, or via `-DTAMAPOKE_BOARD_175`/`_143`/`_28ROUND` passed as
+`compiler.cpp.extra_flags` (NOT `build.extra_flags` — that property already
+carries the core's own `-D`s, like `ARDUINO_USB_CDC_ON_BOOT`, and overwriting
+it instead of appending breaks the build in ways that look unrelated to board
+selection entirely). See `PORTAGE_1.43.md` and `PORTAGE_28ROUND.md` for what
+is verified vs. guessed on each non-1.75 board.
 Arduino/C++ firmware + a Python asset pipeline + a browser-based flasher.
 Personal, non-commercial fan project. Code MIT; sprites CC BY-NC (PMD SpriteCollab).
 
@@ -9,18 +17,20 @@ Personal, non-commercial fan project. Code MIT; sprites CC BY-NC (PMD SpriteColl
 | Path | What |
 |---|---|
 | `TamaPoke.ino` | Main sketch (~2.3k LOC): UI, screens, touch, serial console, `FW_VERSION` |
+| `board_select.h` | Which board to build for — one `TAMAPOKE_BOARD_*` macro |
 | `pet.cpp/.h` | Game state machine: stats, tick, evolution, eggs, save/load, balance constants |
 | `species.h` / `dex.h` | The 151: names, typings, evolution chains, base stats, rarity tiers, favourite berry |
 | `types.h` | Type-effectiveness helpers over the generated 18x18 chart in `dex.h` |
 | `party.cpp/.h` | The 6 retired pets banked by farewell/release (not runaway) |
 | `i18n.cpp/.h` | 6-language string table (ES/EN/FR/DE/IT/PT) |
-| `audio.cpp/.h` | ES8311 codec over I2S |
-| `rtcbat.cpp/.h` | PCF85063 RTC + AXP2101 battery/PMU/PWR button |
-| `sdmon.cpp/.h` | SD sprite streaming + USB `PUT` file transfer |
-| `pin_config.h` | Board pinout — from the official Waveshare repo, don't invent values |
+| `audio.cpp/.h` | ES8311 codec over I2S (1.75 only; stub on the other two — no audio hardware on either) |
+| `rtcbat.cpp/.h` | PCF85063 RTC + AXP2101 battery/PMU/PWR button (PMU is 1.75-only; stub otherwise) |
+| `sdmon.cpp/.h` | SD sprite streaming + USB `PUT` file transfer — SD_MMC native (1.75), dedicated SPI (1.43), or SPI shared with the LCD's init bus (2.8C) |
+| `tca9554.h/.cpp` | I2C GPIO expander driver, 2.8C only (LCD/touch/SD control lines live behind it on that board) |
+| `pin_config.h` | Board pinout per `TAMAPOKE_BOARD_*` — from the official Waveshare repo/schematic for each, don't invent values |
 | `tools/*.py` | Sprite pipeline (PMD fetch/pack, thumbs, bundle, USB send) |
-| `tools/emu/` | Desktop emulator: runs the real firmware in an SDL window |
-| `web/` | ESP Web Tools installer page + prebuilt `tamapoke.bin` + `sprites-<region>.pak` (committed: release assets have no CORS) |
+| `tools/emu/` | Desktop emulator: runs the real firmware (the default board in `board_select.h`) in an SDL window |
+| `web/` | ESP Web Tools installer page + prebuilt firmware for all three boards under `web/firmware/<board>/` + `web/manifest-<board>.json` + `sprites-<region>.pak` (committed: release assets have no CORS) |
 
 ## Build & flash
 

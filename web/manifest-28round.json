@@ -1,5 +1,5 @@
 {
-  "name": "TamaPoke",
+  "name": "TamaPoke (Waveshare ESP32-S3 2.8inch Round Touch, EXPERIMENTAL/UNTESTED)",
   "version": "3.16",
   "new_install_prompt_erase": true,
   "builds": [
@@ -7,19 +7,19 @@
       "chipFamily": "ESP32-S3",
       "parts": [
         {
-          "path": "firmware/bootloader.bin",
+          "path": "firmware/28round/bootloader.bin",
           "offset": 0
         },
         {
-          "path": "firmware/partitions.bin",
+          "path": "firmware/28round/partitions.bin",
           "offset": 32768
         },
         {
-          "path": "firmware/boot_app0.bin",
+          "path": "firmware/28round/boot_app0.bin",
           "offset": 57344
         },
         {
-          "path": "firmware/app.bin",
+          "path": "firmware/28round/app.bin",
           "offset": 65536
         }
       ]

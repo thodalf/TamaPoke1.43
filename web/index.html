@@ -36,8 +36,8 @@
 <body>
 <div class="wrap">
   <h1>🐢 TamaPoke</h1>
-  <p class="sub">A 386-Pokémon tamagotchi for the Waveshare ESP32-S3-Touch-AMOLED-1.43.
-     Install it from your browser — no Arduino, no drivers.</p>
+  <p class="sub">A 386-Pokémon tamagotchi. Install it from your browser — no Arduino,
+     no drivers. Works on three Waveshare boards.</p>
 
   <p class="unsupported" id="unsupported">
     ⚠️ Your browser doesn't support Web Serial. Use <b>Chrome</b> or <b>Edge</b> on a computer.
@@ -59,9 +59,25 @@
 
   <h2><span class="num">1</span>Flash the firmware</h2>
   <div class="step">
+    <p><b>Which board do you have?</b> Each one gets its own build — picking the
+       wrong one will not brick anything (worst case: a black screen), but it
+       will not work either.</p>
+    <div class="row" role="radiogroup" aria-label="Board" id="boardPicker" style="margin-bottom:1rem">
+      <label style="cursor:pointer"><input type="radio" name="board" value="manifest-143.json" checked>
+        ESP32-S3-Touch-AMOLED-1.43</label>
+      <label style="cursor:pointer"><input type="radio" name="board" value="manifest-175.json">
+        ESP32-S3-Touch-AMOLED-1.75</label>
+      <label style="cursor:pointer"><input type="radio" name="board" value="manifest-28round.json">
+        ESP32-S3 2.8" Round Touch <span style="color:var(--bad)">(experimental, untested)</span></label>
+    </div>
+    <p class="note" id="roundWarning" style="display:none;border-left:4px solid #e8503a;padding-left:10px">
+       ⚠️ This board's firmware has never run on real hardware — it was built from
+       the official schematic and reference code alone. It may not boot, and the
+       screen/touch may not work at all. If you try it, please report back (see
+       the repository link at the bottom) with what you see.</p>
     <p>Plug the board in via USB and press install. Pick the port and wait.
        Takes about a minute. No drivers needed on any OS.</p>
-    <esp-web-install-button manifest="manifest.json">
+    <esp-web-install-button manifest="manifest-143.json" id="installBtn">
       <button slot="activate">⚡ Install TamaPoke</button>
       <span slot="unsupported">Browser not supported (use Chrome/Edge).</span>
       <span slot="not-allowed">Needs HTTPS.</span>
@@ -129,6 +145,17 @@
 <script>
 const log = (m) => { const el = document.getElementById('log'); el.style.display='block';
   el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
+
+// Swaps which manifest the install button points at -- esp-web-tools reads
+// the `manifest` attribute once when you click it, so this just needs to be
+// current at click time, not reactive to anything else.
+for (const r of document.querySelectorAll('#boardPicker input[name="board"]')) {
+  r.onchange = () => {
+    document.getElementById('installBtn').setAttribute('manifest', r.value);
+    document.getElementById('roundWarning').style.display =
+      r.value.includes('28round') ? 'block' : 'none';
+  };
+}
 const supported = 'serial' in navigator;
 if (!supported) { document.getElementById('unsupported').style.display='block';
   document.getElementById('connect').disabled = true; }

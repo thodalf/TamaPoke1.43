@@ -46,6 +46,7 @@
 #include "party.h"
 #include "save.h"
 #include "pet.h"
+#include "noart.h"     // speciesHasArt(): the quiz picks only species that can be drawn
 #include "sdmon.h"
 #include "rtcbat.h"
 #include "i18n.h"
@@ -53,7 +54,7 @@
 
 // Version del firmware. Subir este numero en cada release (y manifest.json para
 // el instalador web). Se muestra en la pantalla de ajustes y por serie al arrancar.
-#define FW_VERSION "3.17"
+#define FW_VERSION "3.18"
 
 #if defined(TAMAPOKE_DISPLAY_QSPI_AMOLED)
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -524,6 +525,17 @@ uint16_t berryHits = 0, berryMisses = 0;
 uint8_t berryGain = 0;
 bool berryNewHi = false;
 
+// "who's that Pokemon?" quiz -- a pure happiness minigame, no stat rides on
+// it. See Pet::quizResult() and the render/tap/spawn functions further down.
+bool quizOpen = false;
+uint32_t quizUntil = 0, quizOverUntil = 0;
+int16_t quizDex = 0;
+int16_t quizOpt[4];
+uint8_t quizAnswer = 0;   // which of quizOpt[] is the one shown
+uint16_t quizScore = 0, quizMisses = 0;
+uint8_t quizGain = 0;
+bool quizNewHi = false;
+
 bool gymOpen = false;
 bool gymHard = false;   // which ladder the list is showing
 
@@ -562,7 +574,7 @@ static void btlResolve(uint8_t yourMove);
 // from TRAINERS[] because they only ever arrive once; a linked opponent can
 // switch OUT and back IN, so its creatures have to remember how battered they
 // are. Host side only -- the guest takes absolute health off the wire.
-Combatant btlFoeSquad[TRAINER_TEAM_MAX];
+Combatant btlFoeSquad[LINK_TEAM_MAX];   // the peer's live pet can ride along too
 uint8_t btlFoeSquadN = 0;
 uint8_t btlMyAct = 0;        // host: our own action, latched until theirs lands
 // Which ladder the gym screen and the current fight belong to. The battle keeps
@@ -793,16 +805,20 @@ static inline bool btlCellHit(int i, int16_t x, int16_t y) {
          y >= BTL_HIT_Y0(i) && y <= BTL_HIT_Y1(i);
 }
 
-// True si el equipo no cabe en las 4 celdas del grid de cambio -- la celda 3
-// se convierte en boton de pagina (">"/"<") en vez de un puesto real. Con 4 o
-// menos, las 4 celdas son puestos y no hay paginas: comportamiento identico
-// al de antes de que esto existiera.
+// True when the team does not fit the switch grid's 4 cells -- cell 3 becomes
+// a page button (">") instead of a real slot. With 4 or fewer, all 4 cells
+// are slots and there is no paging: identical to before this existed.
 static inline bool btlSwitchPaged() { return btlSquadN > 4; }
-// Indice real en btlSquad[] para la celda `cell` (0..2, la 3 es navegacion
-// cuando btlSwitchPaged()) en la pagina actual, o -1 si esa celda esta vacia
-// (ultima pagina con un equipo de 5). UNA sola funcion para render y tap, por
-// la misma razon que btlCellHit() es una sola: que ninguno de los dos lados
-// pueda tener su propia cuenta y desincronizarse.
+// How many pages of 3 real slots the current squad needs. The live pet now
+// rides as a bonus 7th member (see buildSquad()), so this can reach 3 --
+// btlSwitchPage used to just toggle 0/1 with `^= 1`, which silently dropped
+// the 7th member's page.
+static inline uint8_t btlSwitchPages() { return (btlSquadN + 2) / 3; }
+// Real index into btlSquad[] for cell `cell` (0..2, cell 3 is navigation when
+// btlSwitchPaged()) on the current page, or -1 if that cell is empty (the
+// last page with a squad not a multiple of 3). ONE function for render and
+// tap, for the same reason btlCellHit() is one: neither side can keep its own
+// count and drift out of sync with the other.
 static int8_t btlSwitchSlot(uint8_t cell) {
   uint8_t i = btlSwitchPaged() ? (uint8_t)(btlSwitchPage * 3 + cell) : cell;
   return (i < btlSquadN) ? (int8_t)i : (int8_t)-1;
@@ -1239,7 +1255,7 @@ void loop() {
   // 85 ms en juego/saco: margen seguro para que el redibujado no pise el envio
   // DMA del frame anterior (a 40-65 ms solapaba y causaba flashes negros; con
   // sprites grandes el dibujo tarda mas, asi que se deja colchon)
-  if (now - lastRender >= (uint32_t)((gameOpen || sackOpen || spdOpen || berryOpen) ? 85 : 100)) {
+  if (now - lastRender >= (uint32_t)((gameOpen || sackOpen || spdOpen || berryOpen || quizOpen) ? 85 : 100)) {
     lastRender = now;
     render();
   }
@@ -1650,6 +1666,7 @@ void onSwipeV(int dir) {
   if (sackOpen) { leaveSack(); return; }
   if (spdOpen) { leaveSpeed(); return; }
   if (berryOpen) { leaveBerry(); return; }
+  if (quizOpen) { leaveQuiz(); return; }
   if (galleryOpen) {
     if (galleryDetail) { galleryDetail = 0; galleryPmd.unload(); galleryDirty = true; return; }
     galleryRegion = (uint8_t)((galleryRegion + (dir > 0 ? 1 : GAL_REGIONS - 1)) % GAL_REGIONS);
@@ -2055,6 +2072,7 @@ void onSwipe(int dir) {
   if (gameOpen) { leaveGame(); return; }   // swipe out, keeping what you earned
   if (spdOpen) { leaveSpeed(); return; }
   if (berryOpen) { leaveBerry(); return; }
+  if (quizOpen) { leaveQuiz(); return; }
   if (kbOpen || clockOpen) return;
   if (cardOpen) {  // dentro de la ficha: cambiar entre las 4 paginas
     int p = (int)cardPage + (dir > 0 ? -1 : 1);  // izquierda avanza
@@ -2256,6 +2274,11 @@ void onTap(int16_t x, int16_t y) {
         sfxPlay(SFX_TAP);
         menuOpen = false;
         choiceKind = 3; choiceUntil = millis() + 12000;
+      } else if (menuPage == 1 && i == 1) {   // QUIZ
+        if (pet.isEgg() || pet.sleeping || pet.ceremony != CER_NONE) { sfxPlay(SFX_DENY); return; }
+        sfxPlay(SFX_TAP);
+        menuOpen = false;
+        startQuiz();
       }
       // any other slot on page 1 is empty: no-op, the menu stays open
       return;
@@ -2340,6 +2363,10 @@ void onTap(int16_t x, int16_t y) {
   }
   if (berryOpen) {
     berryTap(x, y);
+    return;
+  }
+  if (quizOpen) {
+    quizTap(x, y);
     return;
   }
   if (gameOpen) {
@@ -2657,7 +2684,7 @@ uint8_t uiCurrentScreen() {
   if (lanOpen) return SCR_LAN;
   if (gymOpen) return gymPick ? SCR_GYMPICK : SCR_GYM;
   if (pet.hasLearnOffer()) return SCR_LEARN;
-  if (gameOpen || sackOpen || spdOpen || berryOpen) return SCR_GAME;
+  if (gameOpen || sackOpen || spdOpen || berryOpen || quizOpen) return SCR_GAME;
   if (trainOpen) return SCR_TRAIN;
   if (menuOpen) return SCR_MENU;
   return SCR_MAIN;
@@ -2740,6 +2767,10 @@ void render() {
   }
   if (berryOpen) {
     renderBerry();
+    return;
+  }
+  if (quizOpen) {
+    renderQuiz();
     return;
   }
   if (trainOpen) {
@@ -3668,7 +3699,7 @@ void drawMoveRow(int y, uint8_t mv, bool highlight, int16_t dex) {
   gfx->setTextColor(UI_INK);
   gfx->setTextSize(2);
   gfx->setCursor(82, y + 8);
-  gfx->print(m.name);
+  gfx->print(moveName(mv));
   // There is no per-type palette (DexEntry.accent is per species), and inventing
   // one by hand would duplicate what gen_dex.py generates. Colouring same-type
   // moves in the species accent is more useful anyway: STAB is a 1.5x damage
@@ -3901,8 +3932,13 @@ static void wildFoeFromSpecies(Combatant &c, Pet &outFoe, int16_t dex, uint8_t l
 //
 // Both ladders cap your LEVEL to the leader's best, so a gym is always fought
 // on its own terms and grinding is never the answer -- the type chart, the
-// movesets and the choices are. Hard additionally caps your team SIZE to the
-// leader's, so Brock is two-on-two. The caps are applied while BUILDING the
+// movesets and the choices are. Hard additionally caps your BANKED team size
+// to the leader's, so Brock is two-on-two there.
+//
+// The live pet is a bonus 7th member on top of that cap, not one of the six
+// -- btlSquad[] is sized TRAINER_TEAM_MAX + 1 for exactly this. It rides free
+// because it is the one creature still actually being raised; the banked cap
+// still governs everyone else. The caps are applied while BUILDING the
 // combatants, so nothing is ever written back to the stored creature, exactly
 // like ailments.
 static void buildSquad(uint8_t maxLvl, uint8_t maxCount, uint16_t mask) {
@@ -3910,23 +3946,26 @@ static void buildSquad(uint8_t maxLvl, uint8_t maxCount, uint16_t mask) {
   btlSquadAt = 0;
   btlPetIn = false;
   if (maxCount > TRAINER_TEAM_MAX) maxCount = TRAINER_TEAM_MAX;
-  if (!pet.isEgg() && btlSquadN < maxCount && (mask & 1)) {
+  if (!pet.isEgg() && (mask & 1)) {
     Pet tmp = pet;                       // a copy: the real pet is untouched
     if (maxLvl && tmp.level() > maxLvl)
       tmp.ageMinutes = (uint32_t)(maxLvl - 1) * MINUTES_PER_LEVEL;
     combatantFromPet(btlSquad[btlSquadN++], tmp);
     btlPetIn = true;      // the training reward goes to whoever fought for it
   }
-  for (int i = 0; i < PARTY_SLOTS && btlSquadN < maxCount; i++) {
+  uint8_t banked = 0;
+  for (int i = 0; i < PARTY_SLOTS && banked < maxCount; i++) {
     if (party.slots[i].empty() || !(mask & (1 << (i + 1)))) continue;
     PartyMon m = party.slots[i];
     if (maxLvl && m.level > maxLvl) m.level = maxLvl;
     combatantFromParty(btlSquad[btlSquadN++], m);
+    banked++;
   }
   if (btlSquadN) btlYou = btlSquad[0];
 }
 
-// How many you may bring: the leader's own count in hard mode, six otherwise.
+// How many BANKED members you may bring: the leader's own count in hard mode,
+// six otherwise. The live pet is a bonus on top -- see pickEffectiveCap().
 uint8_t squadCap(uint8_t idx, bool hard) {
   if (idx >= TRAINER_COUNT) return TRAINER_TEAM_MAX;
   return hard ? TRAINERS[idx].count : TRAINER_TEAM_MAX;
@@ -3969,14 +4008,14 @@ void startLinkBattle() {
   // silently diverge if anything changed between offering and starting.
   btlSquadN = 0;
   btlSquadAt = 0;
-  for (uint8_t i = 0; i < lan.mineN && i < TRAINER_TEAM_MAX; i++)
+  for (uint8_t i = 0; i < lan.mineN && i < LINK_TEAM_MAX; i++)
     linkMonTo(btlSquad[btlSquadN++], lan.mine[i]);
   if (!btlSquadN) return;
   btlYou = btlSquad[0];
   btlHard = false;
   btlFoeAt = 0;
   btlFoeSquadN = 0;
-  for (uint8_t i = 0; i < lan.theirsN && i < TRAINER_TEAM_MAX; i++)
+  for (uint8_t i = 0; i < lan.theirsN && i < LINK_TEAM_MAX; i++)
     linkMonTo(btlFoeSquad[btlFoeSquadN++], lan.theirs[i]);
   btlFoe = btlFoeSquad[0];
   btlResetCommon();
@@ -4535,9 +4574,11 @@ void renderBattle() {
         gfx->drawRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, UI_INK);
         gfx->setTextColor(UI_INK);
         gfx->setTextSize(3);
-        const char *lbl = btlSwitchPage ? "<" : ">";
+        // Always ">": with up to 3 pages now (the live pet's bonus slot can
+        // push a full squad past 6), cycling forward and wrapping is simpler
+        // than a two-way toggle that only ever knew about page 0 and 1.
         gfx->setCursor(x + BTL_CELL_W / 2 - 6, y + 10);
-        gfx->print(lbl);
+        gfx->print(">");
         continue;
       }
       int8_t si = btlSwitchSlot(cell);
@@ -4853,9 +4894,13 @@ void battleTap(int16_t x, int16_t y) {
     bool paged = btlSwitchPaged();
     for (uint8_t cell = 0; cell < 4; cell++) {
       if (!btlCellHit(cell, x, y)) continue;
-      if (paged && cell == 3) { btlSwitchPage ^= 1; sfxPlay(SFX_TAP); return; }
+      if (paged && cell == 3) {
+        btlSwitchPage = (uint8_t)((btlSwitchPage + 1) % btlSwitchPages());
+        sfxPlay(SFX_TAP);
+        return;
+      }
       int8_t si = btlSwitchSlot(cell);
-      if (si < 0) return;  // hueco vacio en la ultima pagina, no hace nada
+      if (si < 0) return;  // empty cell on the last page, does nothing
       uint8_t i = (uint8_t)si;
       const Combatant &m = (i == btlSquadAt) ? btlYou : btlSquad[i];
       if (i == btlSquadAt || m.fainted()) { sfxPlay(SFX_DENY); return; }
@@ -5288,6 +5333,165 @@ void renderBerry() {
   gfx->flush();
 }
 
+// ---------- "who's that Pokemon?" quiz ----------
+// A pure happiness minigame -- see Pet::quizResult(). The silhouette trick
+// already existed for an unregistered gallery entry (renderGallery()'s `!reg`
+// flag on drawThumb()); this just always asks for it, on a species you are
+// quizzed to NAME rather than one you have not met yet.
+#define QUIZ_MS 25000UL
+#define QUIZ_OPTS 4
+#define QUIZ_OPT_X(i) (BTL_GRID_X + ((i) % 2) * (BTL_CELL_W + 8))
+#define QUIZ_OPT_Y(i) (BTL_GRID_Y + ((i) / 2) * (BTL_CELL_H + 8))
+
+// A random species with real art. Prefers one already registered, so the
+// question is always something the player could plausibly know -- but falls
+// back to anything drawable once there are too few registered to fill 4
+// distinct options, which is every early game.
+static int16_t quizRandomDex(bool preferKnown) {
+  for (int tries = 0; tries < 60; tries++) {
+    int16_t d = (int16_t)(1 + random(DEX_COUNT));
+    if (!speciesHasArt(d)) continue;
+    if (preferKnown && !pet.isRegistered(d)) continue;
+    return d;
+  }
+  int16_t d = 1;
+  while (d < DEX_COUNT && !speciesHasArt(d)) d++;
+  return d;
+}
+
+void quizSpawn() {
+  bool known = pet.registeredCount() >= QUIZ_OPTS;
+  quizDex = quizRandomDex(known);
+  quizAnswer = (uint8_t)random(QUIZ_OPTS);
+  quizOpt[quizAnswer] = quizDex;
+  for (uint8_t i = 0; i < QUIZ_OPTS; i++) {
+    if (i == quizAnswer) continue;
+    int16_t d;
+    bool dup;
+    int guard = 0;
+    do {
+      d = quizRandomDex(known);
+      dup = (d == quizDex);
+      for (uint8_t j = 0; j < i && !dup; j++) dup = (quizOpt[j] == d);
+    } while (dup && ++guard < 30);
+    quizOpt[i] = d;
+  }
+}
+
+void startQuiz() {
+  if (pet.isEgg() || pet.sleeping || pet.ceremony) return;
+  quizOpen = true;
+  quizUntil = millis() + QUIZ_MS;
+  quizOverUntil = 0;
+  quizScore = 0;
+  quizMisses = 0;
+  quizGain = 0;
+  quizNewHi = false;
+  quizSpawn();
+}
+
+// Leaving early banks what was actually earned, same as every other minigame
+// here -- quitting used to forfeit everything, which read as a punishment for
+// walking away rather than as an honest partial result.
+void leaveQuiz() {
+  if (!quizOverUntil) quizGain = pet.quizResult((uint8_t)quizScore);
+  quizOpen = false;
+}
+
+void quizTap(int16_t x, int16_t y) {
+  if (quizOverUntil) return;
+  if (y < 72) { leaveQuiz(); return; }   // header tap = leave, same as the others
+  for (uint8_t i = 0; i < QUIZ_OPTS; i++) {
+    int cx0 = QUIZ_OPT_X(i), cy0 = QUIZ_OPT_Y(i);
+    if (x < cx0 || x > cx0 + BTL_CELL_W || y < cy0 || y > cy0 + BTL_CELL_H) continue;
+    if (i == quizAnswer) { quizScore++; sfxPlay(SFX_TAP); }
+    else { quizMisses++; sfxPlay(SFX_DENY); }
+    quizSpawn();
+    return;
+  }
+}
+
+void renderQuiz() {
+  uint32_t now = millis();
+  drawGameScene();
+  bool night = sceneHour() < 6 || sceneHour() >= 20;
+  uint16_t ink = night ? UI_INK_NIGHT : UI_INK;
+
+  if (quizOverUntil) {
+    if (now > quizOverUntil) { quizOpen = false; return; }
+    char b[24];
+    snprintf(b, sizeof(b), T(S_SCORE_FMT), quizScore);
+    gfx->setTextColor(ink);
+    gfx->setTextSize(4);
+    gfx->setCursor(CX - strlen(b) * 12, 150);
+    gfx->print(b);
+    gfx->setTextSize(2);
+    if (quizNewHi && quizScore > 0) {
+      gfx->setTextColor(UI_BAR_WARN);
+      gfx->setCursor(CX - strlen(T(S_NEW_RECORD)) * 6, 214);
+      gfx->print(T(S_NEW_RECORD));
+    } else {
+      char rec[20];
+      snprintf(rec, sizeof(rec), T(S_RECORD_FMT), pet.quizHi);
+      gfx->setTextColor(ink);
+      gfx->setCursor(CX - strlen(rec) * 6, 214);
+      gfx->print(rec);
+    }
+    const char *msg = quizScore >= 8 ? T(S_GREAT_JOY) : T(S_PLUS_JOY);
+    gfx->setTextColor(ink);
+    gfx->setCursor(CX - strlen(msg) * 6, 250);
+    gfx->print(msg);
+    gfx->flush();
+    return;
+  }
+
+  if (now >= quizUntil) {
+    quizNewHi = (quizScore > pet.quizHi);
+    quizGain = pet.quizResult((uint8_t)quizScore);
+    sfxPlay(quizNewHi && quizScore > 0 ? SFX_MEDAL : SFX_PLAY);
+    quizOverUntil = now + 3500;
+    gfx->flush();
+    return;
+  }
+
+  char b[8];
+  snprintf(b, sizeof(b), "%u", quizScore);
+  gfx->setTextColor(ink);
+  gfx->setTextSize(4);
+  gfx->setCursor(CX - strlen(b) * 12, 30);
+  gfx->print(b);
+  uint32_t left = (quizUntil > now) ? (quizUntil - now + 999) / 1000 : 0;
+  snprintf(b, sizeof(b), "%us", (unsigned)left);
+  gfx->setTextSize(2);
+  gfx->setCursor(CX - strlen(b) * 6, 76);
+  gfx->print(b);
+
+  const uint8_t *th = thumbs.get(quizDex);
+  if (th) {
+    // drawThumb() centres within an 80px box (GAL_CELL, defined later in the
+    // file than this function) -- 80 is written out here rather than forward-
+    // referencing that macro.
+    drawThumb(th, CX - 80, 116, 4, true);   // always a silhouette: that IS the question
+  } else {
+    gfx->setTextColor(ink);
+    gfx->setTextSize(6);
+    gfx->setCursor(CX - 18, 140);
+    gfx->print("?");
+  }
+
+  for (uint8_t i = 0; i < QUIZ_OPTS; i++) {
+    int x = QUIZ_OPT_X(i), y = QUIZ_OPT_Y(i);
+    gfx->fillRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, UI_BG_DAY);
+    gfx->drawRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, UI_INK);
+    gfx->setTextColor(UI_INK);
+    gfx->setTextSize(1);
+    const char *nm = dexName(quizOpt[i]);
+    gfx->setCursor(x + (BTL_CELL_W - (int)strlen(nm) * 6) / 2, y + BTL_CELL_H / 2 - 4);
+    gfx->print(nm);
+  }
+  gfx->flush();
+}
+
 // ---------- team select ----------
 // Which creatures come to this fight. It exists because hard mode caps your
 // team to the leader's size, so the difference between a sweep and a wipe is
@@ -5305,19 +5509,35 @@ uint8_t pickChosen() {
     if (pickExists(n) && (squadMask & (1 << n))) c++;
   return c;
 }
+// Chosen BANKED members only, n=1..PARTY_SLOTS -- the live pet (n=0) is a
+// bonus and never counts against squadCap(), so this is what the cap must
+// actually be checked against. See buildSquad().
+uint8_t pickBankedChosen() {
+  uint8_t c = 0;
+  for (uint8_t n = 1; n <= PARTY_SLOTS; n++)
+    if (pickExists(n) && (squadMask & (1 << n))) c++;
+  return c;
+}
 uint8_t pickCandidates() {
   uint8_t c = 0;
   for (uint8_t n = 0; n <= PARTY_SLOTS; n++)
     if (pickExists(n)) c++;
   return c;
 }
-// Trims the selection to the first `cap` candidates. The default used to be
-// "everything", which with a live pet plus six banked is seven against a cap of
-// six -- so the screen opened already invalid.
+// The cap shown/used for the total selection: the banked cap plus one for the
+// live pet, if it exists to ride along.
+uint8_t pickEffectiveCap(uint8_t idx, bool hard) {
+  return squadCap(idx, hard) + (pickExists(0) ? 1 : 0);
+}
+// Fills the default selection: the live pet rides free if it exists, then the
+// first `cap` banked members. The default used to be "everything", which with
+// six banked against a cap of six left no room for the live pet and opened
+// the screen already invalid; now the live pet is never what has to be
+// trimmed.
 void pickDefault(uint8_t cap) {
-  squadMask = 0;
+  squadMask = pickExists(0) ? 1 : 0;
   uint8_t taken = 0;
-  for (uint8_t n = 0; n <= PARTY_SLOTS && taken < cap; n++)
+  for (uint8_t n = 1; n <= PARTY_SLOTS && taken < cap; n++)
     if (pickExists(n)) { squadMask |= (1 << n); taken++; }
 }
 
@@ -5381,10 +5601,14 @@ void renderPick() {
   gfx->setTextSize(2);
   gfx->setCursor(CX - (int)strlen(head) * 6, 44);
   gfx->print(head);
+  // Shown against the EFFECTIVE cap (banked + the live pet's bonus slot), but
+  // coloured off the real constraint -- the banked count against `cap` -- so
+  // a full squad of banked+pet reads as "7/7" rather than flagging as over.
+  uint8_t ecap = pickEffectiveCap(pickTrainer, pickHard);
   char sub[28];
-  snprintf(sub, sizeof(sub), T(S_PICK_FMT), pickChosen(), cap);
+  snprintf(sub, sizeof(sub), T(S_PICK_FMT), pickChosen(), ecap);
   gfx->setTextSize(1);
-  gfx->setTextColor(pickChosen() > cap ? UI_BAR_BAD : UI_TRACK);
+  gfx->setTextColor(pickBankedChosen() > cap ? UI_BAR_BAD : UI_TRACK);
   gfx->setCursor(CX - (int)strlen(sub) * 3, 68);
   gfx->print(sub);
 
@@ -5404,7 +5628,7 @@ void renderPick() {
     else gfx->drawCircle(dx, 332, 4, UI_INK);
   }
 
-  bool ok = pickChosen() > 0 && pickChosen() <= cap;
+  bool ok = pickChosen() > 0 && pickBankedChosen() <= cap;
   gfx->fillRoundRect(PICK_BACK_X, PICK_GO_Y, PICK_BTN_W, PICK_BTN_H, 12, UI_TRACK);
   gfx->drawRoundRect(PICK_BACK_X, PICK_GO_Y, PICK_BTN_W, PICK_BTN_H, 12, UI_INK);
   gfx->setTextColor(UI_INK);
@@ -5435,7 +5659,7 @@ void pickTap(int16_t x, int16_t y) {
   if (y >= PICK_GO_Y && y <= PICK_GO_Y + PICK_BTN_H &&
       x >= PICK_GO_X && x <= PICK_GO_X + PICK_BTN_W) {
     uint8_t cap = squadCap(pickTrainer, pickHard);
-    if (pickChosen() == 0 || pickChosen() > cap) return;   // GO stays inert
+    if (pickChosen() == 0 || pickBankedChosen() > cap) return;   // GO stays inert
     sfxPlay(SFX_TAP);
     pickOpen = false;
     if (pickTrainer == PICK_LAN) {
@@ -6073,8 +6297,8 @@ void renderCard() {
 // ---------- menu overlay ----------
 
 // Row labels are built fresh each frame because two of them carry live counts.
-// Page-aware: slot 4 is always CLOSE, page 0 is today's four rows, page 1
-// currently has only WILD at slot 0 (1-3 are empty, drawMenu skips them).
+// Page-aware: slot 4 is always CLOSE, page 0 is today's four rows, page 1 has
+// RETIRE at slot 0 and QUIZ at slot 1 (2-3 are empty, drawMenu skips them).
 static void menuRowLabel(int i, char *out, size_t n) {
   if (i == MENU_ROWS - 1) { snprintf(out, n, "%s", T(S_CLOSE)); return; }
   if (menuPage == 0) {
@@ -6086,6 +6310,8 @@ static void menuRowLabel(int i, char *out, size_t n) {
     }
   } else if (i == 0) {
     snprintf(out, n, "%s", T(S_RETIRE));
+  } else if (i == 1) {
+    snprintf(out, n, "%s", T(S_QUIZ));
   } else {
     out[0] = 0;
   }
@@ -6110,11 +6336,13 @@ void drawMenu() {
 
   for (int i = 0; i < MENU_ROWS; i++) {
     bool close = (i == MENU_ROWS - 1);
-    if (menuPage == 1 && i > 0 && !close) continue;   // empty slot: nothing drawn
+    if (menuPage == 1 && i > 1 && !close) continue;   // empty slot: nothing drawn
     int y = MENU_ROW_Y(i);
     bool dead = close ? false :
                 (menuPage == 0 && i == 3 && (pet.isEgg() || pet.ceremony != CER_NONE)) ||
-                (menuPage == 1 && i == 0 && !pet.canRetireNow());   // an egg or a companion
+                (menuPage == 1 && i == 0 && !pet.canRetireNow()) ||   // an egg or a companion
+                (menuPage == 1 && i == 1 &&
+                 (pet.isEgg() || pet.sleeping || pet.ceremony != CER_NONE));
     gfx->fillRoundRect(MENU_X + 18, y, MENU_W - 36, MENU_ROW_H, 12,
                        close || dead ? UI_TRACK : UI_BG_DAY);
     gfx->drawRoundRect(MENU_X + 18, y, MENU_W - 36, MENU_ROW_H, 12, UI_INK);

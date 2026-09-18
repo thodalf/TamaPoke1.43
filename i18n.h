@@ -145,6 +145,7 @@ enum StrId : uint8_t {
   S_MAKE_ACTIVE_HINT,  // why it is greyed: mid farewell/runaway/goodbye
   S_BRI_FMT,        // brightness level, e.g. "BRI 7"
   S_BTL_FLED_FMT,   // "%s fled!" -- a failed capture, worse than just breaking free
+  S_QUIZ,           // menu row: the "who's that Pokemon?" minigame
   STR_COUNT
 };
 

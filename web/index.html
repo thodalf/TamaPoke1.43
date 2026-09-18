@@ -57,6 +57,14 @@
        computer</b> rather than through a hub.</p>
   </div>
 
+  <div class="step" style="border-left:4px solid var(--ok);background:#f4fbf5">
+    <p><b>🔄 Already have TamaPoke on this board and just updating?</b> Back up
+       first — it takes ten seconds and is the one real safety net against an
+       update going wrong, whatever the cause. <a href="#backupStep">Jump to
+       step 3, back up, then come back here.</a> Skip this if the board is
+       brand new: there is nothing on it to lose yet.</p>
+  </div>
+
   <h2><span class="num">1</span>Flash the firmware</h2>
   <div class="step">
     <p><b>Which board do you have?</b> Each one gets its own build — picking the
@@ -125,6 +133,30 @@
     <p class="note">🎨 Want to make your own sprites? See <a href="https://github.com/DylanPDao/TamaPoke#generate-and-load-the-sprites-yourself" target="_blank">how to generate &amp; load them</a> in the repo.</p>
     <div class="bar" id="bar"><div></div></div>
     <pre id="log"></pre>
+  </div>
+
+  <h2 id="backupStep"><span class="num">3</span>Back up / restore your save</h2>
+  <div class="step">
+    <p>Reuses the same <code>EXPORT</code>/<code>IMPORT</code> serial commands
+       the console already had -- this just saves you typing them by hand.
+       <b>Do a backup before any update you care about</b>: it is the one real
+       safety net against an update going wrong, whatever the cause.</p>
+    <div class="row">
+      <button id="connectBak">🔌 Connect board</button>
+      <button id="saveBak" disabled>💾 Save my data</button>
+      <button id="restoreBak" disabled>📤 Restore from a file</button>
+      <input id="restoreFile" type="file" accept=".txt" disabled hidden>
+    </div>
+    <p class="note">"Save my data" downloads a small <code>.txt</code> file --
+       keep it somewhere you will find it again. "Restore" asks for that file
+       and sends it back; the board checks it (size, checksum) before touching
+       anything, so a wrong or damaged file is refused rather than half-applied.
+       A successful restore <b>replaces</b> the current save and restarts the
+       board -- there is no merge, so restoring an old backup after playing
+       more will roll progress back to that backup's moment.</p>
+    <p class="note">Close the step-1/step-2 tabs first if they used the same
+       port (only one program can talk to the board over USB at a time).</p>
+    <pre id="bakLog"></pre>
   </div>
 
   <h2>How to play</h2>
@@ -324,6 +356,87 @@ document.getElementById('files').onchange = async (ev) => {
   for (const f of files) items.push({ name: 'mons/' + f.name, data: new Uint8Array(await f.arrayBuffer()) });
   log(`${items.length} files. Sending...`);
   await sendAll(items);
+};
+
+// ---- Step 3: backup / restore, over the same EXPORT/IMPORT serial commands
+// the console already understood -- this is a friendlier way to type them.
+const bakLog = (m) => { const el = document.getElementById('bakLog'); el.style.display = 'block';
+  el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
+
+document.getElementById('connectBak').onclick = async () => {
+  try {
+    if (!port) {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200 });
+      reader = port.readable.getReader();
+      writer = port.writable.getWriter();
+      lineBuf = '';
+    }
+    bakLog('Connected.');
+    document.getElementById('saveBak').disabled = false;
+    document.getElementById('restoreBak').disabled = false;
+    document.getElementById('restoreFile').disabled = false;
+    document.getElementById('connectBak').disabled = true;
+  } catch (e) { bakLog('Could not connect: ' + e.message); }
+};
+
+document.getElementById('saveBak').onclick = async () => {
+  if (!writer) { bakLog('Connect the board first.'); return; }
+  bakLog('Exporting...');
+  lineBuf = '';   // drop anything left over from an unrelated previous read
+  await writer.write(enc.encode('EXPORT\n'));
+  const lines = [];
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const l = await readLine(deadline - Date.now());
+    if (l === null) { bakLog('Timed out waiting for the board.'); return; }
+    lines.push(l);
+    if (l === 'IMPORT') break;   // the bare line terminates the block
+  }
+  if (lines.length < 2 || lines[lines.length - 1] !== 'IMPORT') {
+    bakLog('Export failed or was incomplete.');
+    return;
+  }
+  const text = lines.join('\n') + '\n';
+  const blob = new Blob([text], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().slice(0, 10);
+  a.href = url; a.download = `tamapoke-backup-${stamp}.txt`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  bakLog(`Saved (${lines.length - 2} chunk(s)). Keep the file somewhere safe.`);
+};
+
+document.getElementById('restoreBak').onclick = () => document.getElementById('restoreFile').click();
+
+document.getElementById('restoreFile').onchange = async (ev) => {
+  const file = ev.target.files[0];
+  ev.target.value = '';
+  if (!file) return;
+  if (!writer) { bakLog('Connect the board first.'); return; }
+  const text = await file.text();
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l.startsWith('IMPORT'));
+  if (!lines.length || lines[lines.length - 1] !== 'IMPORT') {
+    bakLog('That does not look like a TamaPoke backup file.');
+    return;
+  }
+  if (!confirm('This replaces whatever is on the board right now and restarts it. Continue?')) return;
+  bakLog(`Restoring (${lines.length - 1} chunk(s))...`);
+  lineBuf = '';
+  for (const l of lines) {
+    await writer.write(enc.encode(l + '\n'));
+    await new Promise(r => setTimeout(r, 15));   // gives the board's serial buffer room to drain
+  }
+  const l = await readLine(8000);
+  if (l === 'IMPORT OK') {
+    bakLog('Restore accepted. The board is restarting...');
+    await readLine(3000);   // the trailing DONE line, if it arrives before the reset
+  } else if (l === 'IMPORT REJECTED') {
+    bakLog('The board rejected this file (corrupted or the wrong save).');
+  } else {
+    bakLog('No response from the board -- check the connection and try again.');
+  }
 };
 </script>
 </body>

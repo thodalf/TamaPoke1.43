@@ -47,7 +47,7 @@ extern bool btlHard;
 extern bool gymOpen, gymHard; extern uint8_t gymPage;
 extern bool pickOpen, pickHard; extern uint8_t pickTrainer; extern uint16_t squadMask;
 uint8_t squadCap(uint8_t idx, bool hard);
-uint8_t pickChosen(); uint8_t pickCandidates(); void pickDefault(uint8_t);
+uint8_t pickChosen(); uint8_t pickBankedChosen(); uint8_t pickCandidates(); void pickDefault(uint8_t);
 extern uint8_t pickPage;
 #define PICK_X(i) (78 + ((i) % 2) * 160)
 #define PICK_Y(i) (86 + ((i) / 2) * 80)
@@ -382,49 +382,61 @@ int main(int argc, char **argv) {
   printf("PASS: hard mode keeps its own unlock order\n");
   gymHard = false; gymOpen = false; pet.badges = 0;
 
-  // ---- a live pet plus a FULL party is 7 candidates against a cap of 6. The
-  // 7th used to be counted but never drawn and never tappable, so FIGHT sat
-  // inert with no way to fix it.
+  // ---- a live pet plus a FULL party is 7 candidates, and now a cap of 6 no
+  // longer trims one of them away: the live pet is a bonus 7th slot on top of
+  // the banked cap (see buildSquad()), so all 7 fit by default.
   battleOpen = false; pickOpen = false;
   for (int i = 0; i < PARTY_SLOTS; i++) { PartyMon m; m.dex = 9 + i * 10; m.level = 40;
     m.ivAtk = m.ivDef = m.ivSpe = m.ivHp = 25; party.replaceAt(i, m); }
   pickTrainer = 0; pickHard = false; pickPage = 0;
   pickDefault(squadCap(0, false));
-  printf("     candidates=%u chosen=%u cap=%u\n",
-         pickCandidates(), pickChosen(), squadCap(0, false));
+  printf("     candidates=%u chosen=%u banked=%u cap=%u\n",
+         pickCandidates(), pickChosen(), pickBankedChosen(), squadCap(0, false));
   if (pickCandidates() != PARTY_SLOTS + 1) { printf("FAIL: expected 7 candidates\n"); return 1; }
   printf("PASS: a live pet plus a full party is 7 candidates\n");
-  if (pickChosen() > squadCap(0, false)) {
-    printf("FAIL: the picker opens over its own cap\n"); return 1; }
-  printf("PASS: it opens with a valid selection, not everything\n");
+  if (pickChosen() != PARTY_SLOTS + 1) {
+    printf("FAIL: the live pet's bonus slot should let all 7 be chosen by default\n");
+    return 1;
+  }
+  if (pickBankedChosen() > squadCap(0, false)) {
+    printf("FAIL: the picker opens over its own banked cap\n"); return 1; }
+  printf("PASS: it opens with everything selected, banked still within its cap\n");
   { uint8_t pages = (pickCandidates() + 6 - 1) / 6;
     if (pages < 2) { printf("FAIL: 7 candidates must span 2 pages\n"); return 1; }
     printf("PASS: the 7th is reachable on page %u of %u\n", pages, pages); }
   for (int i = 0; i < PARTY_SLOTS; i++) party.releaseAt(i);
   squadMask = 0xFFFF;
 
-  // ---- team select: cap enforcement and toggling
+  // ---- team select: cap enforcement and toggling. The banked cap applies to
+  // the 6 party slots only -- the live pet rides as a free 7th, so a squad
+  // that keeps it is cap+1, never just cap.
   battleOpen = false;
   for (int i = 0; i < 5; i++) { PartyMon m; m.dex = 9 + i; m.level = 40;
     m.ivAtk = m.ivDef = m.ivSpe = m.ivHp = 25; party.replaceAt(i, m); }
   squadMask = 0xFFFF;
-  pickTrainer = 0; pickHard = true; pickOpen = true;   // BROCK: cap of 2
+  pickTrainer = 0; pickHard = true; pickOpen = true;   // BROCK: banked cap of 2
   uint8_t cap = squadCap(0, true);
   // x=300: FIGHT sits right of centre now, with BACK to its left. Tapping 233
   // lands in the gap between them and hits nothing, which made the next check
   // pass for the wrong reason.
-  click(300, 366);                                     // FIGHT with 6 chosen
+  click(300, 366);                                     // FIGHT with 5 banked chosen
   if (battleOpen || !pickOpen) { printf("FAIL: FIGHT fired while over the cap\n"); return 1; }
-  printf("PASS: FIGHT is inert while over the cap (%u chosen, cap %u)\n", 6, cap);
+  printf("PASS: FIGHT is inert while over the banked cap (5 banked chosen, cap %u)\n", cap);
 
-  // deselect down to the cap, then it should start
-  for (int slot = 5; slot >= (int)cap; slot--)
+  // deselect the banked members down to the cap, keeping the live pet (slot 0)
+  for (int slot = 5; slot > (int)cap; slot--)
     click(PICK_X(slot) + 40, PICK_Y(slot) + 30);
+  if (pickBankedChosen() > cap) { printf("FAIL: still over the banked cap\n"); return 1; }
   click(300, 366);
   if (!battleOpen) { printf("FAIL: FIGHT did not start at the cap\n"); return 1; }
-  printf("PASS: trimming to the cap lets the fight start (squad %u)\n", btlSquadN);
-  if (btlSquadN > cap) { printf("FAIL: squad exceeded the cap\n"); return 1; }
-  printf("PASS: the squad respects the chosen team\n");
+  printf("PASS: trimming the banked members to the cap lets the fight start (squad %u)\n",
+         btlSquadN);
+  if (btlSquadN != cap + 1) {
+    printf("FAIL: expected the banked cap (%u) plus the live pet, got squad %u\n",
+           cap, btlSquadN);
+    return 1;
+  }
+  printf("PASS: the live pet rode along as a bonus slot on top of the banked cap\n");
   battleOpen = false;
   squadMask = 0xFFFF;
   for (int i = 0; i < 5; i++) party.releaseAt(i);

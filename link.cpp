@@ -25,7 +25,7 @@ uint16_t linkBuildTag() {
   uint32_t h = 2166136261u;
   const uint16_t bits[] = {
     (uint16_t)MOVE_COUNT, (uint16_t)DEX_COUNT, (uint16_t)MOVE_SLOTS,
-    (uint16_t)TRAINER_TEAM_MAX, (uint16_t)LINK_TEAM_MAX, (uint16_t)sizeof(LinkMon),
+    (uint16_t)TRAINER_TEAM_MAX, (uint16_t)sizeof(LinkMon),
     (uint16_t)sizeof(LinkResult), (uint16_t)SI_COUNT,
   };
   for (uint16_t b : bits) { h ^= b; h *= 16777619u; }
@@ -147,7 +147,7 @@ void Link::begin(bool host, const char *myName) {
 }
 
 void Link::addMon(const LinkMon &m) {
-  if (mineN < LINK_TEAM_MAX) mine[mineN++] = m;
+  if (mineN < TRAINER_TEAM_MAX) mine[mineN++] = m;
 }
 
 void Link::start() {
@@ -266,8 +266,8 @@ void Link::onPacket(const uint8_t *buf, uint8_t len) {
       if (buildTheirs != linkBuildTag()) { state = LINK_REFUSED; return; }
       peerId = (uint16_t)body[HB_ID] | ((uint16_t)body[HB_ID + 1] << 8);
       bool theyHost = (body[HB_FLAGS] & 1) != 0;
-      theirsExpected = body[HB_COUNT] > LINK_TEAM_MAX ? LINK_TEAM_MAX
-                                                       : body[HB_COUNT];
+      theirsExpected = body[HB_COUNT] > TRAINER_TEAM_MAX ? TRAINER_TEAM_MAX
+                                                        : body[HB_COUNT];
       memcpy(peerName, body + HB_NAME, LINK_NAME_LEN);
       peerName[LINK_NAME_LEN - 1] = 0;
 
@@ -298,7 +298,7 @@ void Link::onPacket(const uint8_t *buf, uint8_t len) {
     case LM_SQUAD: {
       if (n < 1 + sizeof(LinkMon)) return;
       uint8_t idx = body[0];
-      if (idx >= LINK_TEAM_MAX) return;
+      if (idx >= TRAINER_TEAM_MAX) return;
       memcpy(&theirs[idx], body + 1, sizeof(LinkMon));
       theirsGot |= (uint16_t)1 << idx;
       if (idx + 1 > theirsN) theirsN = idx + 1;

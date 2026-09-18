@@ -54,7 +54,7 @@
 
 // Version del firmware. Subir este numero en cada release (y manifest.json para
 // el instalador web). Se muestra en la pantalla de ajustes y por serie al arrancar.
-#define FW_VERSION "3.18"
+#define FW_VERSION "3.19"
 
 #if defined(TAMAPOKE_DISPLAY_QSPI_AMOLED)
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -536,6 +536,21 @@ uint16_t quizScore = 0, quizMisses = 0;
 uint8_t quizGain = 0;
 bool quizNewHi = false;
 
+// RSVP speed-reading tool -- a pure utility, no stat or joy rides on it,
+// unlike every minigame above. Books are .txt files the web installer puts
+// under /books; see BookReader in sdmon.h/.cpp for the streamed reader and
+// startRsvp()/renderRsvp()/rsvpTap() further down for the screen.
+bool rsvpOpen = false;
+bool rsvpPicking = false;    // showing the book list rather than reading one
+char rsvpBooks[12][24];
+uint8_t rsvpBookN = 0;
+uint8_t rsvpPickPage = 0;
+char rsvpTitle[24] = "";     // current book's name, for the header
+char rsvpWord[24] = "";      // the word on screen right now
+uint32_t rsvpNextAt = 0;
+bool rsvpPaused = false;
+bool rsvpDone = false;       // reached the end of the book
+
 bool gymOpen = false;
 bool gymHard = false;   // which ladder the list is showing
 
@@ -574,7 +589,7 @@ static void btlResolve(uint8_t yourMove);
 // from TRAINERS[] because they only ever arrive once; a linked opponent can
 // switch OUT and back IN, so its creatures have to remember how battered they
 // are. Host side only -- the guest takes absolute health off the wire.
-Combatant btlFoeSquad[LINK_TEAM_MAX];   // the peer's live pet can ride along too
+Combatant btlFoeSquad[TRAINER_TEAM_MAX];
 uint8_t btlFoeSquadN = 0;
 uint8_t btlMyAct = 0;        // host: our own action, latched until theirs lands
 // Which ladder the gym screen and the current fight belong to. The battle keeps
@@ -704,7 +719,7 @@ uint8_t gymPage = 0;
 #define GYM_ROW_Y(i) (110 + (i) * 50)
 int8_t btlTrainer = -1;      // index into TRAINERS, -1 = a one-off fight
 bool btlHard = false;
-Combatant btlSquad[TRAINER_TEAM_MAX + 1];
+Combatant btlSquad[TRAINER_TEAM_MAX];
 uint8_t btlSquadN = 0, btlSquadAt = 0;
 // El grid de cambio tiene 4 celdas (comparte BTL_CELL_X/Y/W/H con el de
 // movimientos -- ver el comentario de btlCellHit() sobre por que NO debe
@@ -809,11 +824,6 @@ static inline bool btlCellHit(int i, int16_t x, int16_t y) {
 // a page button (">") instead of a real slot. With 4 or fewer, all 4 cells
 // are slots and there is no paging: identical to before this existed.
 static inline bool btlSwitchPaged() { return btlSquadN > 4; }
-// How many pages of 3 real slots the current squad needs. The live pet now
-// rides as a bonus 7th member (see buildSquad()), so this can reach 3 --
-// btlSwitchPage used to just toggle 0/1 with `^= 1`, which silently dropped
-// the 7th member's page.
-static inline uint8_t btlSwitchPages() { return (btlSquadN + 2) / 3; }
 // Real index into btlSquad[] for cell `cell` (0..2, cell 3 is navigation when
 // btlSwitchPaged()) on the current page, or -1 if that cell is empty (the
 // last page with a squad not a multiple of 3). ONE function for render and
@@ -956,6 +966,57 @@ void setDispBrightness(uint8_t v) {
   p.begin("tamapoke", false);
   p.putUChar("bri", gBri);
   p.end();
+}
+
+// RSVP reading speed, same cached-Preferences pattern as brightness/volume.
+#define RSVP_WPM_MIN 100
+#define RSVP_WPM_MAX 800
+#define RSVP_WPM_STEP 50
+static uint16_t gRsvpWpm = 300;
+static bool gRsvpWpmLoaded = false;
+uint16_t rsvpWpm() {
+  if (!gRsvpWpmLoaded) {
+    Preferences p;
+    p.begin("tamapoke", true);
+    gRsvpWpm = p.getUShort("rwpm", 300);
+    if (gRsvpWpm < RSVP_WPM_MIN || gRsvpWpm > RSVP_WPM_MAX) gRsvpWpm = 300;
+    p.end();
+    gRsvpWpmLoaded = true;
+  }
+  return gRsvpWpm;
+}
+void setRsvpWpm(uint16_t v) {
+  if (v < RSVP_WPM_MIN) v = RSVP_WPM_MIN;
+  if (v > RSVP_WPM_MAX) v = RSVP_WPM_MAX;
+  gRsvpWpm = v;
+  gRsvpWpmLoaded = true;
+  Preferences p;
+  p.begin("tamapoke", false);
+  p.putUShort("rwpm", gRsvpWpm);
+  p.end();
+}
+
+// Where you left off, so closing the tool and coming back (even across a
+// reboot) picks up mid-book rather than restarting it -- same "keep what you
+// earned" spirit as every minigame's early-exit. Only one book's position is
+// remembered, same as there being one live pet: the LAST one you were in.
+void rsvpSaveProgress(const char *name, uint32_t pos) {
+  Preferences p;
+  p.begin("tamapoke", false);
+  p.putString("rbook", name);
+  p.putUInt("rpos", pos);
+  p.end();
+}
+// Returns the saved offset for `name`, or 0 if the save is for a different
+// book (a fresh book always starts at the top) or there is none yet.
+uint32_t rsvpLoadProgress(const char *name) {
+  Preferences p;
+  p.begin("tamapoke", true);
+  char saved[24] = "";
+  p.getString("rbook", saved, sizeof(saved));
+  uint32_t pos = (!strcmp(saved, name)) ? p.getUInt("rpos", 0) : 0;
+  p.end();
+  return pos;
 }
 
 void setup() {
@@ -1255,7 +1316,7 @@ void loop() {
   // 85 ms en juego/saco: margen seguro para que el redibujado no pise el envio
   // DMA del frame anterior (a 40-65 ms solapaba y causaba flashes negros; con
   // sprites grandes el dibujo tarda mas, asi que se deja colchon)
-  if (now - lastRender >= (uint32_t)((gameOpen || sackOpen || spdOpen || berryOpen || quizOpen) ? 85 : 100)) {
+  if (now - lastRender >= (uint32_t)((gameOpen || sackOpen || spdOpen || berryOpen || quizOpen || rsvpOpen) ? 85 : 100)) {
     lastRender = now;
     render();
   }
@@ -1667,6 +1728,7 @@ void onSwipeV(int dir) {
   if (spdOpen) { leaveSpeed(); return; }
   if (berryOpen) { leaveBerry(); return; }
   if (quizOpen) { leaveQuiz(); return; }
+  if (rsvpOpen) { leaveRsvp(); return; }
   if (galleryOpen) {
     if (galleryDetail) { galleryDetail = 0; galleryPmd.unload(); galleryDirty = true; return; }
     galleryRegion = (uint8_t)((galleryRegion + (dir > 0 ? 1 : GAL_REGIONS - 1)) % GAL_REGIONS);
@@ -2073,6 +2135,7 @@ void onSwipe(int dir) {
   if (spdOpen) { leaveSpeed(); return; }
   if (berryOpen) { leaveBerry(); return; }
   if (quizOpen) { leaveQuiz(); return; }
+  if (rsvpOpen) { leaveRsvp(); return; }
   if (kbOpen || clockOpen) return;
   if (cardOpen) {  // dentro de la ficha: cambiar entre las 4 paginas
     int p = (int)cardPage + (dir > 0 ? -1 : 1);  // izquierda avanza
@@ -2279,6 +2342,10 @@ void onTap(int16_t x, int16_t y) {
         sfxPlay(SFX_TAP);
         menuOpen = false;
         startQuiz();
+      } else if (menuPage == 1 && i == 2) {   // READ
+        sfxPlay(SFX_TAP);
+        menuOpen = false;
+        startRsvp();
       }
       // any other slot on page 1 is empty: no-op, the menu stays open
       return;
@@ -2367,6 +2434,10 @@ void onTap(int16_t x, int16_t y) {
   }
   if (quizOpen) {
     quizTap(x, y);
+    return;
+  }
+  if (rsvpOpen) {
+    rsvpTap(x, y);
     return;
   }
   if (gameOpen) {
@@ -2684,7 +2755,7 @@ uint8_t uiCurrentScreen() {
   if (lanOpen) return SCR_LAN;
   if (gymOpen) return gymPick ? SCR_GYMPICK : SCR_GYM;
   if (pet.hasLearnOffer()) return SCR_LEARN;
-  if (gameOpen || sackOpen || spdOpen || berryOpen || quizOpen) return SCR_GAME;
+  if (gameOpen || sackOpen || spdOpen || berryOpen || quizOpen || rsvpOpen) return SCR_GAME;
   if (trainOpen) return SCR_TRAIN;
   if (menuOpen) return SCR_MENU;
   return SCR_MAIN;
@@ -2771,6 +2842,10 @@ void render() {
   }
   if (quizOpen) {
     renderQuiz();
+    return;
+  }
+  if (rsvpOpen) {
+    renderRsvp();
     return;
   }
   if (trainOpen) {
@@ -3932,13 +4007,8 @@ static void wildFoeFromSpecies(Combatant &c, Pet &outFoe, int16_t dex, uint8_t l
 //
 // Both ladders cap your LEVEL to the leader's best, so a gym is always fought
 // on its own terms and grinding is never the answer -- the type chart, the
-// movesets and the choices are. Hard additionally caps your BANKED team size
-// to the leader's, so Brock is two-on-two there.
-//
-// The live pet is a bonus 7th member on top of that cap, not one of the six
-// -- btlSquad[] is sized TRAINER_TEAM_MAX + 1 for exactly this. It rides free
-// because it is the one creature still actually being raised; the banked cap
-// still governs everyone else. The caps are applied while BUILDING the
+// movesets and the choices are. Hard additionally caps your team SIZE to the
+// leader's, so Brock is two-on-two. The caps are applied while BUILDING the
 // combatants, so nothing is ever written back to the stored creature, exactly
 // like ailments.
 static void buildSquad(uint8_t maxLvl, uint8_t maxCount, uint16_t mask) {
@@ -3946,26 +4016,23 @@ static void buildSquad(uint8_t maxLvl, uint8_t maxCount, uint16_t mask) {
   btlSquadAt = 0;
   btlPetIn = false;
   if (maxCount > TRAINER_TEAM_MAX) maxCount = TRAINER_TEAM_MAX;
-  if (!pet.isEgg() && (mask & 1)) {
+  if (!pet.isEgg() && btlSquadN < maxCount && (mask & 1)) {
     Pet tmp = pet;                       // a copy: the real pet is untouched
     if (maxLvl && tmp.level() > maxLvl)
       tmp.ageMinutes = (uint32_t)(maxLvl - 1) * MINUTES_PER_LEVEL;
     combatantFromPet(btlSquad[btlSquadN++], tmp);
     btlPetIn = true;      // the training reward goes to whoever fought for it
   }
-  uint8_t banked = 0;
-  for (int i = 0; i < PARTY_SLOTS && banked < maxCount; i++) {
+  for (int i = 0; i < PARTY_SLOTS && btlSquadN < maxCount; i++) {
     if (party.slots[i].empty() || !(mask & (1 << (i + 1)))) continue;
     PartyMon m = party.slots[i];
     if (maxLvl && m.level > maxLvl) m.level = maxLvl;
     combatantFromParty(btlSquad[btlSquadN++], m);
-    banked++;
   }
   if (btlSquadN) btlYou = btlSquad[0];
 }
 
-// How many BANKED members you may bring: the leader's own count in hard mode,
-// six otherwise. The live pet is a bonus on top -- see pickEffectiveCap().
+// How many you may bring: the leader's own count in hard mode, six otherwise.
 uint8_t squadCap(uint8_t idx, bool hard) {
   if (idx >= TRAINER_COUNT) return TRAINER_TEAM_MAX;
   return hard ? TRAINERS[idx].count : TRAINER_TEAM_MAX;
@@ -4008,14 +4075,14 @@ void startLinkBattle() {
   // silently diverge if anything changed between offering and starting.
   btlSquadN = 0;
   btlSquadAt = 0;
-  for (uint8_t i = 0; i < lan.mineN && i < LINK_TEAM_MAX; i++)
+  for (uint8_t i = 0; i < lan.mineN && i < TRAINER_TEAM_MAX; i++)
     linkMonTo(btlSquad[btlSquadN++], lan.mine[i]);
   if (!btlSquadN) return;
   btlYou = btlSquad[0];
   btlHard = false;
   btlFoeAt = 0;
   btlFoeSquadN = 0;
-  for (uint8_t i = 0; i < lan.theirsN && i < LINK_TEAM_MAX; i++)
+  for (uint8_t i = 0; i < lan.theirsN && i < TRAINER_TEAM_MAX; i++)
     linkMonTo(btlFoeSquad[btlFoeSquadN++], lan.theirs[i]);
   btlFoe = btlFoeSquad[0];
   btlResetCommon();
@@ -4574,11 +4641,9 @@ void renderBattle() {
         gfx->drawRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, UI_INK);
         gfx->setTextColor(UI_INK);
         gfx->setTextSize(3);
-        // Always ">": with up to 3 pages now (the live pet's bonus slot can
-        // push a full squad past 6), cycling forward and wrapping is simpler
-        // than a two-way toggle that only ever knew about page 0 and 1.
+        const char *lbl = btlSwitchPage ? "<" : ">";
         gfx->setCursor(x + BTL_CELL_W / 2 - 6, y + 10);
-        gfx->print(">");
+        gfx->print(lbl);
         continue;
       }
       int8_t si = btlSwitchSlot(cell);
@@ -4894,11 +4959,7 @@ void battleTap(int16_t x, int16_t y) {
     bool paged = btlSwitchPaged();
     for (uint8_t cell = 0; cell < 4; cell++) {
       if (!btlCellHit(cell, x, y)) continue;
-      if (paged && cell == 3) {
-        btlSwitchPage = (uint8_t)((btlSwitchPage + 1) % btlSwitchPages());
-        sfxPlay(SFX_TAP);
-        return;
-      }
+      if (paged && cell == 3) { btlSwitchPage ^= 1; sfxPlay(SFX_TAP); return; }
       int8_t si = btlSwitchSlot(cell);
       if (si < 0) return;  // empty cell on the last page, does nothing
       uint8_t i = (uint8_t)si;
@@ -5492,6 +5553,226 @@ void renderQuiz() {
   gfx->flush();
 }
 
+// ---------- RSVP speed-reading tool ----------
+// Streams a .txt book off the SD one word at a time via BookReader (see
+// sdmon.h/.cpp) and flashes each word centred on screen at a chosen
+// words-per-minute rate -- the whole premise of RSVP is that a fixed fixation
+// point removes the need for saccades, so reading holds up well above the
+// speed a moving eye normally manages. A pure utility: unlike every minigame
+// above, nothing here touches a pet stat or joy.
+#define RSVP_PICK_ROWS 5
+#define RSVP_PICK_ROW_H 52
+#define RSVP_PICK_Y(i) (100 + (i) * RSVP_PICK_ROW_H)
+#define RSVP_SPD_Y 344
+#define RSVP_SPD_MINUS_X (CX - 90)
+#define RSVP_SPD_PLUS_X (CX + 42)
+#define RSVP_SPD_BTN_W 48
+#define RSVP_SPD_BTN_H 30
+
+static void rsvpScheduleNext() {
+  rsvpNextAt = millis() + 60000UL / rsvpWpm();
+}
+
+// Opens `name` (no path or .txt suffix -- BookReader adds both) and resumes
+// where a PREVIOUS session on this same book left off, if any.
+static void rsvpOpenBook(const char *name) {
+  strncpy(rsvpTitle, name, sizeof(rsvpTitle) - 1);
+  rsvpTitle[sizeof(rsvpTitle) - 1] = 0;
+  rsvpPicking = false;
+  rsvpPaused = false;
+  rsvpDone = false;
+  rsvpWord[0] = 0;
+  if (!gBook.open(name)) { rsvpDone = true; return; }
+  uint32_t resume = rsvpLoadProgress(name);
+  if (resume) gBook.seek(resume);
+  if (!gBook.nextWord(rsvpWord, sizeof(rsvpWord))) { rsvpDone = true; return; }
+  rsvpScheduleNext();
+}
+
+// Lists /books and either opens the one book there, opens the picker if there
+// is more than one, or leaves renderRsvp() to show S_NO_BOOKS.
+void startRsvp() {
+  rsvpOpen = true;
+  rsvpPicking = false;
+  rsvpPaused = false;
+  rsvpDone = false;
+  rsvpPickPage = 0;
+  rsvpWord[0] = 0;
+  rsvpBookN = sdListBooks(rsvpBooks, 12);
+  if (rsvpBookN == 0) return;
+  if (rsvpBookN == 1) { rsvpOpenBook(rsvpBooks[0]); return; }
+  rsvpPicking = true;
+}
+
+// Banks the reading position exactly the way every minigame banks a partial
+// score on an early exit -- closing mid-book is the normal case, not a loss.
+void leaveRsvp() {
+  if (gBook.loaded) rsvpSaveProgress(rsvpTitle, gBook.bytePos);
+  gBook.close();
+  rsvpOpen = false;
+}
+
+void rsvpTap(int16_t x, int16_t y) {
+  if (y < 72) { leaveRsvp(); return; }   // header tap = leave, same as every minigame
+  if (rsvpBookN == 0) return;
+  if (rsvpPicking) {
+    uint8_t seen = 0, drawn = 0;
+    for (uint8_t i = 0; i < rsvpBookN; i++) {
+      if (seen++ < rsvpPickPage * RSVP_PICK_ROWS) continue;
+      if (drawn >= RSVP_PICK_ROWS) break;
+      int ry = RSVP_PICK_Y(drawn);
+      if (y >= ry && y <= ry + RSVP_PICK_ROW_H - 8) { sfxPlay(SFX_TAP); rsvpOpenBook(rsvpBooks[i]); return; }
+      drawn++;
+    }
+    // tapping below the rows, near the page dots, pages forward
+    uint8_t pages = (rsvpBookN + RSVP_PICK_ROWS - 1) / RSVP_PICK_ROWS;
+    if (pages > 1 && y >= 400) {
+      rsvpPickPage = (uint8_t)((rsvpPickPage + 1) % pages);
+      sfxPlay(SFX_TAP);
+    }
+    return;
+  }
+  if (rsvpDone) {
+    // tapping a finished book restarts it from the top -- otherwise, once
+    // read, it would stay stuck on THE END forever, since resuming always
+    // seeks to the saved position and a finished book's saved position IS
+    // its own end.
+    sfxPlay(SFX_TAP);
+    gBook.seek(0);
+    rsvpDone = false;
+    if (gBook.nextWord(rsvpWord, sizeof(rsvpWord))) rsvpScheduleNext();
+    else rsvpDone = true;   // an empty book: nothing to restart into
+    return;
+  }
+  if (y >= RSVP_SPD_Y && y <= RSVP_SPD_Y + RSVP_SPD_BTN_H) {
+    if (x >= RSVP_SPD_MINUS_X && x < RSVP_SPD_MINUS_X + RSVP_SPD_BTN_W) {
+      setRsvpWpm(rsvpWpm() - RSVP_WPM_STEP);
+      sfxPlay(SFX_TAP);
+      if (!rsvpPaused) rsvpScheduleNext();   // the new speed applies from the word already showing
+      return;
+    }
+    if (x >= RSVP_SPD_PLUS_X && x < RSVP_SPD_PLUS_X + RSVP_SPD_BTN_W) {
+      setRsvpWpm(rsvpWpm() + RSVP_WPM_STEP);
+      sfxPlay(SFX_TAP);
+      if (!rsvpPaused) rsvpScheduleNext();
+      return;
+    }
+    return;
+  }
+  // anywhere else while reading: pause/resume, same as tapping a paused
+  // battle animation area does nothing special -- this screen has no other use
+  // for the middle of the panel
+  sfxPlay(SFX_TAP);
+  rsvpPaused = !rsvpPaused;
+  if (!rsvpPaused) rsvpScheduleNext();
+}
+
+void renderRsvp() {
+  gfx->fillScreen(RGB565_BLACK);
+  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
+  gfx->setTextColor(UI_INK);
+  gfx->setTextSize(2);
+  const char *head = rsvpPicking ? T(S_CHOOSE_BOOK) : (rsvpTitle[0] ? rsvpTitle : T(S_READ));
+  gfx->setCursor(CX - (int)strlen(head) * 6, 44);
+  gfx->print(head);
+
+  if (rsvpBookN == 0) {
+    gfx->setTextSize(2);
+    gfx->setCursor(CX - (int)strlen(T(S_NO_BOOKS)) * 6, 210);
+    gfx->print(T(S_NO_BOOKS));
+    gfx->flush();
+    return;
+  }
+
+  if (rsvpPicking) {
+    uint8_t seen = 0, drawn = 0;
+    for (uint8_t i = 0; i < rsvpBookN; i++) {
+      if (seen++ < rsvpPickPage * RSVP_PICK_ROWS) continue;
+      if (drawn >= RSVP_PICK_ROWS) break;
+      int ry = RSVP_PICK_Y(drawn);
+      gfx->fillRoundRect(70, ry, 326, RSVP_PICK_ROW_H - 8, 10, UI_WHITE);
+      gfx->drawRoundRect(70, ry, 326, RSVP_PICK_ROW_H - 8, 10, UI_INK);
+      gfx->setTextColor(UI_INK);
+      gfx->setTextSize(2);
+      gfx->setCursor(90, ry + 12);
+      gfx->print(rsvpBooks[i]);
+      drawn++;
+    }
+    uint8_t pages = (rsvpBookN + RSVP_PICK_ROWS - 1) / RSVP_PICK_ROWS;
+    for (uint8_t i = 0; i < pages && pages > 1; i++) {
+      int dx = CX - (pages - 1) * 13 + i * 26;
+      if (i == rsvpPickPage) gfx->fillCircle(dx, 420, 5, UI_INK);
+      else gfx->drawCircle(dx, 420, 4, UI_INK);
+    }
+    gfx->flush();
+    return;
+  }
+
+  if (rsvpDone) {
+    gfx->setTextSize(3);
+    gfx->setCursor(CX - (int)strlen(T(S_THE_END)) * 9, 200);
+    gfx->print(T(S_THE_END));
+    gfx->flush();
+    return;
+  }
+
+  // advance to the next word on schedule -- a side effect inside render(),
+  // same pattern renderQuiz() uses for its own countdown, so there is exactly
+  // one place that decides "is it time yet" for either screen
+  if (!rsvpPaused && millis() >= rsvpNextAt) {
+    if (!gBook.nextWord(rsvpWord, sizeof(rsvpWord))) {
+      rsvpDone = true;
+      rsvpSaveProgress(rsvpTitle, gBook.bytePos);
+      sfxPlay(SFX_MEDAL);
+      gfx->flush();
+      return;
+    }
+    rsvpScheduleNext();
+  }
+
+  // progress through the book, in bytes -- a word count would need a full
+  // pre-pass over the file, exactly what streaming exists to avoid
+  if (gBook.fileSize) {
+    uint8_t pct = (uint8_t)((uint64_t)gBook.bytePos * 100 / gBook.fileSize);
+    gfx->fillRoundRect(53, 76, 360, 8, 4, UI_TRACK);
+    gfx->fillRoundRect(53, 76, 360 * pct / 100, 8, 4, UI_BAR_OK);
+  }
+
+  gfx->setTextColor(UI_INK);
+  gfx->setTextSize(4);
+  gfx->setCursor(CX - (int)strlen(rsvpWord) * 12, 200);
+  gfx->print(rsvpWord);
+
+  if (rsvpPaused) {
+    const char *p = T(S_PAUSED);
+    gfx->setTextSize(2);
+    gfx->setTextColor(UI_BAR_WARN);
+    gfx->setCursor(CX - (int)strlen(p) * 6, 260);
+    gfx->print(p);
+  }
+
+  // speed control: same "- value +" idiom as volume/brightness in SETTINGS
+  for (int i = 0; i < 2; i++) {
+    int bx = i ? RSVP_SPD_PLUS_X : RSVP_SPD_MINUS_X;
+    bool live = i ? (rsvpWpm() < RSVP_WPM_MAX) : (rsvpWpm() > RSVP_WPM_MIN);
+    gfx->fillRoundRect(bx, RSVP_SPD_Y, RSVP_SPD_BTN_W, RSVP_SPD_BTN_H, 8,
+                       live ? UI_WHITE : UI_TRACK);
+    gfx->drawRoundRect(bx, RSVP_SPD_Y, RSVP_SPD_BTN_W, RSVP_SPD_BTN_H, 8, UI_INK);
+    gfx->setTextColor(live ? UI_INK : 0x8410);
+    gfx->setTextSize(2);
+    gfx->setCursor(bx + RSVP_SPD_BTN_W / 2 - 6, RSVP_SPD_Y + 6);
+    gfx->print(i ? "+" : "-");
+  }
+  char wl[16];
+  snprintf(wl, sizeof(wl), T(S_WPM_FMT), rsvpWpm());
+  gfx->setTextColor(UI_INK);
+  gfx->setTextSize(1);
+  gfx->setCursor(CX - (int)strlen(wl) * 3, RSVP_SPD_Y + 12);
+  gfx->print(wl);
+
+  gfx->flush();
+}
+
 // ---------- team select ----------
 // Which creatures come to this fight. It exists because hard mode caps your
 // team to the leader's size, so the difference between a sweep and a wipe is
@@ -5509,35 +5790,19 @@ uint8_t pickChosen() {
     if (pickExists(n) && (squadMask & (1 << n))) c++;
   return c;
 }
-// Chosen BANKED members only, n=1..PARTY_SLOTS -- the live pet (n=0) is a
-// bonus and never counts against squadCap(), so this is what the cap must
-// actually be checked against. See buildSquad().
-uint8_t pickBankedChosen() {
-  uint8_t c = 0;
-  for (uint8_t n = 1; n <= PARTY_SLOTS; n++)
-    if (pickExists(n) && (squadMask & (1 << n))) c++;
-  return c;
-}
 uint8_t pickCandidates() {
   uint8_t c = 0;
   for (uint8_t n = 0; n <= PARTY_SLOTS; n++)
     if (pickExists(n)) c++;
   return c;
 }
-// The cap shown/used for the total selection: the banked cap plus one for the
-// live pet, if it exists to ride along.
-uint8_t pickEffectiveCap(uint8_t idx, bool hard) {
-  return squadCap(idx, hard) + (pickExists(0) ? 1 : 0);
-}
-// Fills the default selection: the live pet rides free if it exists, then the
-// first `cap` banked members. The default used to be "everything", which with
-// six banked against a cap of six left no room for the live pet and opened
-// the screen already invalid; now the live pet is never what has to be
-// trimmed.
+// Trims the selection to the first `cap` candidates. The default used to be
+// "everything", which with a live pet plus six banked is seven against a cap of
+// six -- so the screen opened already invalid.
 void pickDefault(uint8_t cap) {
-  squadMask = pickExists(0) ? 1 : 0;
+  squadMask = 0;
   uint8_t taken = 0;
-  for (uint8_t n = 1; n <= PARTY_SLOTS && taken < cap; n++)
+  for (uint8_t n = 0; n <= PARTY_SLOTS && taken < cap; n++)
     if (pickExists(n)) { squadMask |= (1 << n); taken++; }
 }
 
@@ -5601,14 +5866,10 @@ void renderPick() {
   gfx->setTextSize(2);
   gfx->setCursor(CX - (int)strlen(head) * 6, 44);
   gfx->print(head);
-  // Shown against the EFFECTIVE cap (banked + the live pet's bonus slot), but
-  // coloured off the real constraint -- the banked count against `cap` -- so
-  // a full squad of banked+pet reads as "7/7" rather than flagging as over.
-  uint8_t ecap = pickEffectiveCap(pickTrainer, pickHard);
   char sub[28];
-  snprintf(sub, sizeof(sub), T(S_PICK_FMT), pickChosen(), ecap);
+  snprintf(sub, sizeof(sub), T(S_PICK_FMT), pickChosen(), cap);
   gfx->setTextSize(1);
-  gfx->setTextColor(pickBankedChosen() > cap ? UI_BAR_BAD : UI_TRACK);
+  gfx->setTextColor(pickChosen() > cap ? UI_BAR_BAD : UI_TRACK);
   gfx->setCursor(CX - (int)strlen(sub) * 3, 68);
   gfx->print(sub);
 
@@ -5628,7 +5889,7 @@ void renderPick() {
     else gfx->drawCircle(dx, 332, 4, UI_INK);
   }
 
-  bool ok = pickChosen() > 0 && pickBankedChosen() <= cap;
+  bool ok = pickChosen() > 0 && pickChosen() <= cap;
   gfx->fillRoundRect(PICK_BACK_X, PICK_GO_Y, PICK_BTN_W, PICK_BTN_H, 12, UI_TRACK);
   gfx->drawRoundRect(PICK_BACK_X, PICK_GO_Y, PICK_BTN_W, PICK_BTN_H, 12, UI_INK);
   gfx->setTextColor(UI_INK);
@@ -5659,7 +5920,7 @@ void pickTap(int16_t x, int16_t y) {
   if (y >= PICK_GO_Y && y <= PICK_GO_Y + PICK_BTN_H &&
       x >= PICK_GO_X && x <= PICK_GO_X + PICK_BTN_W) {
     uint8_t cap = squadCap(pickTrainer, pickHard);
-    if (pickChosen() == 0 || pickBankedChosen() > cap) return;   // GO stays inert
+    if (pickChosen() == 0 || pickChosen() > cap) return;   // GO stays inert
     sfxPlay(SFX_TAP);
     pickOpen = false;
     if (pickTrainer == PICK_LAN) {
@@ -6298,7 +6559,8 @@ void renderCard() {
 
 // Row labels are built fresh each frame because two of them carry live counts.
 // Page-aware: slot 4 is always CLOSE, page 0 is today's four rows, page 1 has
-// RETIRE at slot 0 and QUIZ at slot 1 (2-3 are empty, drawMenu skips them).
+// RETIRE at slot 0, QUIZ at slot 1 and READ at slot 2 (3 is empty, drawMenu
+// skips it).
 static void menuRowLabel(int i, char *out, size_t n) {
   if (i == MENU_ROWS - 1) { snprintf(out, n, "%s", T(S_CLOSE)); return; }
   if (menuPage == 0) {
@@ -6312,6 +6574,8 @@ static void menuRowLabel(int i, char *out, size_t n) {
     snprintf(out, n, "%s", T(S_RETIRE));
   } else if (i == 1) {
     snprintf(out, n, "%s", T(S_QUIZ));
+  } else if (i == 2) {
+    snprintf(out, n, "%s", T(S_READ));
   } else {
     out[0] = 0;
   }
@@ -6336,7 +6600,7 @@ void drawMenu() {
 
   for (int i = 0; i < MENU_ROWS; i++) {
     bool close = (i == MENU_ROWS - 1);
-    if (menuPage == 1 && i > 1 && !close) continue;   // empty slot: nothing drawn
+    if (menuPage == 1 && i > 2 && !close) continue;   // empty slot: nothing drawn
     int y = MENU_ROW_Y(i);
     bool dead = close ? false :
                 (menuPage == 0 && i == 3 && (pet.isEgg() || pet.ceremony != CER_NONE)) ||

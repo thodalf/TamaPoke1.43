@@ -32,15 +32,9 @@
 // whole handshake without a radio, and a deliberately lossy transport exercises
 // all of the above. Only the radio itself is unverifiable here.
 
-#define LINK_PROTO 3        // bump on ANY wire change; a mismatch is refused
+#define LINK_PROTO 2        // bump on ANY wire change; a mismatch is refused
 #define LINK_MAX_PAYLOAD 200
 #define LINK_NAME_LEN 12
-// The live pet rides as a bonus 7th squad member now (see buildSquad() in the
-// sketch), so a LAN team -- which is built the exact same way -- needs room
-// for it too. Bumped LINK_PROTO because this changes how many SQUAD packets a
-// side will accept, which is exactly the kind of thing two mismatched builds
-// must refuse over rather than silently disagree about.
-#define LINK_TEAM_MAX (TRAINER_TEAM_MAX + 1)
 
 #define LINK_RESEND_MS 400
 // Resends are jittered, and that is not decoration. A fixed interval can lock
@@ -124,9 +118,9 @@ struct Link {
   uint16_t peerId = 0;
   char peerName[LINK_NAME_LEN] = "";
 
-  LinkMon mine[LINK_TEAM_MAX];
+  LinkMon mine[TRAINER_TEAM_MAX];
   uint8_t mineN = 0;
-  LinkMon theirs[LINK_TEAM_MAX];
+  LinkMon theirs[TRAINER_TEAM_MAX];
   uint8_t theirsN = 0;
   uint8_t theirsExpected = 0;  // from their hello, so a lost SQUAD is detectable
   uint16_t theirsGot = 0;      // which slots have actually arrived

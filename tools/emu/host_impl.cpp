@@ -6,7 +6,9 @@
 #include "audio.h"
 #include "linknow.h"
 #include <cstdio>
+#include <cstring>
 #include <string>
+#include <dirent.h>
 
 // Baked in by build.sh from the repo location; --sprites <dir> overrides it.
 #ifndef SPRITE_DIR
@@ -121,6 +123,101 @@ bool sdBegin() {
   return true;
 }
 bool sdSerialCommand(const String &) { return false; }
+
+// --- RSVP books: read from the sibling "books" dir next to the sprite dir,
+// e.g. tools/sdcard/mons -> tools/sdcard/books, so the emulator can exercise
+// the reader interactively without a board. Same shape as the real firmware's
+// BookReader (sdmon.cpp): no open handle kept between calls, just the name
+// and byte offset, re-opened per nextWord() -- host disk I/O is cheap enough
+// that this is not worth a second code path.
+static std::string bookDir() {
+  size_t slash = g_spriteDir.find_last_of('/');
+  std::string base = (slash != std::string::npos) ? g_spriteDir.substr(0, slash) : ".";
+  return base + "/books";
+}
+
+BookReader gBook;
+
+bool BookReader::open(const char *bookName) {
+  close();
+  std::string path = bookDir() + "/" + bookName + ".txt";
+  FILE *f = fopen(path.c_str(), "rb");
+  if (!f) return false;
+  fseek(f, 0, SEEK_END);
+  long n = ftell(f);
+  fclose(f);
+  if (n < 0) return false;
+  fileSize = (uint32_t)n;
+  strncpy(name, bookName, sizeof(name) - 1);
+  name[sizeof(name) - 1] = 0;
+  bytePos = 0;
+  loaded = true;
+  return true;
+}
+
+void BookReader::close() {
+  loaded = false;
+  fileSize = bytePos = 0;
+  name[0] = 0;
+}
+
+void BookReader::seek(uint32_t at) {
+  if (!loaded) return;
+  bytePos = (at > fileSize) ? fileSize : at;
+}
+
+static inline bool isRsvpSpaceHost(int c) {
+  return c == ' ' || c == '\n' || c == '\r' || c == '\t';
+}
+
+bool BookReader::nextWord(char *out, size_t outCap) {
+  out[0] = 0;
+  if (!loaded) return false;
+  std::string path = bookDir() + "/" + name + ".txt";
+  FILE *f = fopen(path.c_str(), "rb");
+  if (!f) { loaded = false; return false; }
+  fseek(f, (long)bytePos, SEEK_SET);
+  bool ok = false;
+  for (;;) {
+    int c;
+    do {
+      c = fgetc(f);
+      if (c == EOF) break;
+      bytePos++;
+    } while (isRsvpSpaceHost(c));
+    if (c == EOF) break;
+    size_t n = 0;
+    while (c != EOF && !isRsvpSpaceHost(c)) {
+      if (c >= 0x20 && c < 0x7F && n + 1 < outCap) out[n++] = (char)c;
+      c = fgetc(f);
+      if (c != EOF) bytePos++;
+    }
+    out[n] = 0;
+    if (n > 0) { ok = true; break; }
+    if (c == EOF) break;   // EOF right at the end of a dropped-only token
+    // else: token was entirely non-ASCII -- loop for the next real word
+  }
+  fclose(f);
+  return ok;
+}
+
+uint8_t sdListBooks(char names[][24], uint8_t max) {
+  uint8_t n = 0;
+  DIR *d = opendir(bookDir().c_str());
+  if (!d) return 0;
+  struct dirent *e;
+  while (n < max && (e = readdir(d))) {
+    std::string nm = e->d_name;
+    if (nm.size() > 4 && nm.substr(nm.size() - 4) == ".txt") {
+      std::string base = nm.substr(0, nm.size() - 4);
+      strncpy(names[n], base.c_str(), 23);
+      names[n][23] = 0;
+      n++;
+    }
+  }
+  closedir(d);
+  return n;
+}
 
 // --- RTC / battery / PMU ---
 static uint32_t g_epoch = 0;

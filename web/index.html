@@ -131,6 +131,12 @@
     </div>
     <p class="note">Have your own <code>.bin</code> files? <label style="cursor:pointer;text-decoration:underline">pick them manually<input id="files" type="file" accept=".bin" multiple disabled hidden></label></p>
     <p class="note">🎨 Want to make your own sprites? See <a href="https://github.com/DylanPDao/TamaPoke#generate-and-load-the-sprites-yourself" target="_blank">how to generate &amp; load them</a> in the repo.</p>
+    <p class="note">📖 <b>RSVP speed-reading minigame</b> (menu → page 2 → READ) needs
+       books on the card too: <label style="cursor:pointer;text-decoration:underline">load .txt file(s)<input id="bookFiles" type="file" accept=".txt" multiple disabled hidden></label>.
+       Plain <b>English/ASCII text only</b> -- the panel's font has no accented
+       letters, so anything else prints as <code>?</code>. Each file becomes one
+       book in the in-game picker; <a href="https://www.gutenberg.org/" target="_blank">Project Gutenberg</a>
+       has thousands of free plain-text public-domain books ("Plain Text UTF-8" download).</p>
     <div class="bar" id="bar"><div></div></div>
     <pre id="log"></pre>
   </div>
@@ -269,6 +275,7 @@ document.getElementById('connect').onclick = async () => {
     log('Connected. Press "Load sprites".');
     for (const b of document.querySelectorAll('[data-region]')) b.disabled = false;
     document.getElementById('files').disabled = false;
+    document.getElementById('bookFiles').disabled = false;
     probeRegions();      // grey out any region that has no bundle to download
     document.getElementById('connect').disabled = true;
   } catch (e) { log('Could not connect: ' + e.message); }
@@ -355,6 +362,16 @@ document.getElementById('files').onchange = async (ev) => {
   const items = [];
   for (const f of files) items.push({ name: 'mons/' + f.name, data: new Uint8Array(await f.arrayBuffer()) });
   log(`${items.length} files. Sending...`);
+  await sendAll(items);
+};
+
+document.getElementById('bookFiles').onchange = async (ev) => {
+  const files = [...ev.target.files];
+  ev.target.value = '';
+  if (!writer) { log('Connect the board first.'); return; }
+  const items = [];
+  for (const f of files) items.push({ name: 'books/' + f.name, data: new Uint8Array(await f.arrayBuffer()) });
+  log(`${items.length} book(s). Sending...`);
   await sendAll(items);
 };
 

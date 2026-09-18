@@ -49,7 +49,7 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
  "ELEGIDOS %u/%u", "LUCHAR", "BLOQUEADO", "POKEMON", "%s derrotado!", "MEDALLA NUEVA!", "VOL %u", "CAJA %u/%u", "cambiar con %s: elige hueco", "CAJA", "TRAER", "solo con un huevo", "COMBATE LAN", "CREAR", "UNIRSE", "buscando...", "listo!", "version distinta", "crear o unirse", "rival: %u mons", "el rival se fue", "esperando al rival...", "OTRA VEZ", "HUIR", "de que region viene el huevo", "%s +%u", "ya no puede entrenar mas", "ELIGE TU REGION", "RETIRAR", "Retirarla ya?", "la siguiente evoluciona un dia mas tarde", "evoluciona un dia mas tarde",   "FALTA PACK", "SOLTAR", "se va para siempre", "AL EQUIPO", "no se unira a tu equipo",
     "SALVAJE", "ATRAPAR", "Atrapado! %s ha sido capturado!", "%s escapo!",
     "VITALIDAD", "Toca: atrapar bayas", "PS +%u",
-    "ACTIVAR", "no mientras se despide", "BRI %u", },
+    "ACTIVAR", "no mientras se despide", "BRI %u", "%s ha huido!", },
   // ---------------- EN ----------------
   {
     "Evolving!", "Yum yum!", "It likes it!", "It's hungry!", "Needs a bath!",
@@ -92,7 +92,7 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
    "NEEDS PACK", "RELEASE", "gone for good", "TO PARTY", "it will not join your party",
     "WILD", "CAPTURE", "Gotcha! %s was caught!", "%s broke free!",
     "VITALITY", "Tap: catch berries", "HP +%u",
-    "SWITCH", "not while it is leaving", "BRI %u", },
+    "SWITCH", "not while it is leaving", "BRI %u", "%s fled!", },
   // ---------------- FR ----------------
   {
     "Il evolue!", "Miam miam!", "Il aime ca!", "Il a faim!", "Besoin d'un bain!",
@@ -134,7 +134,7 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
    "PACK REQUIS", "RELACHER", "parti pour de bon", "A L EQUIPE", "ne rejoindra pas l equipe",
     "SAUVAGE", "CAPTURER", "%s est capture!", "%s s'est echappe!",
     "VITALITE", "Touche: attraper des baies", "PV +%u",
-    "ACTIVER", "pas pendant l adieu", "LUM %u", },
+    "ACTIVER", "pas pendant l adieu", "LUM %u", "%s a pris la fuite!", },
   // ---------------- DE ----------------
   {
     "Entwickelt sich!", "Mampf mampf!", "Gefaellt ihm!", "Hat Hunger!", "Braucht ein Bad!",
@@ -176,7 +176,7 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
    "PACK FEHLT", "FREILASSEN", "fuer immer weg", "INS TEAM", "kommt nicht ins team",
     "WILD", "FANGEN", "%s gefangen!", "%s ist entkommen!",
     "VITALITAET", "Tippen: Beeren fangen", "KP +%u",
-    "WECHSELN", "nicht waehrend des Abschieds", "HELL %u", },
+    "WECHSELN", "nicht waehrend des Abschieds", "HELL %u", "%s ist geflohen!", },
   // ---------------- IT ----------------
   {
     "Si evolve!", "Gnam gnam!", "Gli piace!", "Ha fame!", "Vuole un bagno!",
@@ -218,7 +218,7 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
    "MANCA PACK", "LIBERA", "via per sempre", "AL GRUPPO", "non entrera nel gruppo",
     "SELVATICO", "CATTURA", "%s catturato!", "%s e fuggito!",
     "VITALITA", "Tocca: prendi le bacche", "PS +%u",
-    "ATTIVA", "non durante l addio", "LUM %u", },
+    "ATTIVA", "non durante l addio", "LUM %u", "%s e scappato!", },
   // ---------------- PT ----------------
   {
     "Evoluindo!", "Nham nham!", "Ele gosta!", "Esta com fome!", "Precisa de banho!",
@@ -260,7 +260,7 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
    "FALTA PACK", "SOLTAR", "vai para sempre", "A EQUIPA", "nao entrara na equipa",
     "SELVAGEM", "CAPTURAR", "%s foi capturado!", "%s fugiu!",
     "VITALIDADE", "Toca: apanhar bagas", "PS +%u",
-    "ATIVAR", "nao durante a despedida", "BRI %u", },
+    "ATIVAR", "nao durante a despedida", "BRI %u", "%s escapou!", },
 };
 
 // Nombres de medalla en sus tres longitudes [idioma][medalla].

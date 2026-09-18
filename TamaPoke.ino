@@ -694,6 +694,12 @@ int8_t btlTrainer = -1;      // index into TRAINERS, -1 = a one-off fight
 bool btlHard = false;
 Combatant btlSquad[TRAINER_TEAM_MAX + 1];
 uint8_t btlSquadN = 0, btlSquadAt = 0;
+// El grid de cambio tiene 4 celdas (comparte BTL_CELL_X/Y/W/H con el de
+// movimientos -- ver el comentario de btlCellHit() sobre por que NO debe
+// tener su propia geometria). Con mas de 4 en el equipo, la celda 3 se
+// convierte en boton de pagina en vez de un puesto real; ver
+// btlSwitchSlot()/btlSwitchPaged().
+uint8_t btlSwitchPage = 0;
 uint8_t btlFoeAt = 0;
 
 // Animation. Deliberately built on the thumbnails the screen already draws
@@ -722,6 +728,12 @@ int8_t btlSwapWho = -1;        // 0 = your side, 1 = the foe's, -1 = nothing due
 // btlCaptureWon -- and the animation only dramatizes it; see btlStartCapture.
 uint32_t btlBallUntil = 0;
 bool btlCaptureWon = false;
+// A failed throw has a further chance the foe flees outright instead of just
+// costing the turn -- rolled at the SAME moment as btlCaptureWon (throw time,
+// not when the animation ends), so the flash at the end of the animation and
+// the actual outcome never disagree.
+bool btlFoeFled = false;
+#define CAPTURE_FLEE_PCT 20
 #define BALL_ANIM_MS 1800
 // battle menu: 0 = FIGHT/POKEMON, 1 = the moves, 2 = the switch list
 uint8_t btlMenu = 0;
@@ -779,6 +791,21 @@ int btlCellIndexAt(int16_t x, int16_t y);
 static inline bool btlCellHit(int i, int16_t x, int16_t y) {
   return x >= BTL_HIT_X0(i) && x <= BTL_HIT_X1(i) &&
          y >= BTL_HIT_Y0(i) && y <= BTL_HIT_Y1(i);
+}
+
+// True si el equipo no cabe en las 4 celdas del grid de cambio -- la celda 3
+// se convierte en boton de pagina (">"/"<") en vez de un puesto real. Con 4 o
+// menos, las 4 celdas son puestos y no hay paginas: comportamiento identico
+// al de antes de que esto existiera.
+static inline bool btlSwitchPaged() { return btlSquadN > 4; }
+// Indice real en btlSquad[] para la celda `cell` (0..2, la 3 es navegacion
+// cuando btlSwitchPaged()) en la pagina actual, o -1 si esa celda esta vacia
+// (ultima pagina con un equipo de 5). UNA sola funcion para render y tap, por
+// la misma razon que btlCellHit() es una sola: que ninguno de los dos lados
+// pueda tener su propia cuenta y desincronizarse.
+static int8_t btlSwitchSlot(uint8_t cell) {
+  uint8_t i = btlSwitchPaged() ? (uint8_t)(btlSwitchPage * 3 + cell) : cell;
+  return (i < btlSquadN) ? (int8_t)i : (int8_t)-1;
 }
 #define TRAIN_X 73
 #define TRAIN_Y 96
@@ -2220,15 +2247,15 @@ void onTap(int16_t x, int16_t y) {
         if (i == 0) { cardOpen = true; cardPage = 1; }   // straight to the stats page
         else if (i == 1) { galleryOpen = true; galleryPick = true; galleryPage = 0; rpickPage = 0; galleryDetail = 0; galleryDirty = true; }
         else if (i == 2) { openClock(); }
-        else if (i == 3) {
-          if (!pet.canRetireNow()) { sfxPlay(SFX_DENY); return; }
-          choiceKind = 3; choiceUntil = millis() + 12000;
+        else if (i == 3) {   // WILD
+          if (pet.isEgg() || pet.ceremony != CER_NONE) { sfxPlay(SFX_DENY); return; }
+          startWildBattle();
         }
-      } else if (menuPage == 1 && i == 0) {   // WILD
-        if (pet.isEgg() || pet.ceremony != CER_NONE) { sfxPlay(SFX_DENY); return; }
+      } else if (menuPage == 1 && i == 0) {   // RETIRE
+        if (!pet.canRetireNow()) { sfxPlay(SFX_DENY); return; }
         sfxPlay(SFX_TAP);
         menuOpen = false;
-        startWildBattle();
+        choiceKind = 3; choiceUntil = millis() + 12000;
       }
       // any other slot on page 1 is empty: no-op, the menu stays open
       return;
@@ -4496,9 +4523,30 @@ void renderBattle() {
     }
   } else if (btlMenu == 2) {
     drawBtlBack();
-    // who to bring on instead; the current one and anything fainted is inert
-    for (uint8_t i = 0; i < btlSquadN && i < 4; i++) {
-      int x = BTL_CELL_X(i), y = BTL_CELL_Y(i);
+    // who to bring on instead; the current one and anything fainted is inert.
+    // With more than 4 in the squad, cell 3 is a page button, not a slot --
+    // see btlSwitchSlot()/btlSwitchPaged(), which render and tap both call so
+    // neither can count the squad on its own.
+    bool paged = btlSwitchPaged();
+    for (uint8_t cell = 0; cell < 4; cell++) {
+      int x = BTL_CELL_X(cell), y = BTL_CELL_Y(cell);
+      if (paged && cell == 3) {
+        gfx->fillRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, UI_TRACK);
+        gfx->drawRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, UI_INK);
+        gfx->setTextColor(UI_INK);
+        gfx->setTextSize(3);
+        const char *lbl = btlSwitchPage ? "<" : ">";
+        gfx->setCursor(x + BTL_CELL_W / 2 - 6, y + 10);
+        gfx->print(lbl);
+        continue;
+      }
+      int8_t si = btlSwitchSlot(cell);
+      if (si < 0) {
+        gfx->fillRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, UI_TRACK);
+        gfx->drawRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, 0x8410);
+        continue;
+      }
+      uint8_t i = (uint8_t)si;
       const Combatant &m = (i == btlSquadAt) ? btlYou : btlSquad[i];
       bool usable = (i != btlSquadAt) && !m.fainted();
       gfx->fillRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, usable ? UI_BG_DAY : UI_TRACK);
@@ -4637,6 +4685,7 @@ static void btlRun() {
 static void btlStartCapture() {
   sfxPlay(SFX_TAP);
   btlCaptureWon = (uint8_t)random(100) < captureChancePct(btlFoe);
+  btlFoeFled = !btlCaptureWon && (uint8_t)random(100) < CAPTURE_FLEE_PCT;
   btlBallUntil = millis() + BALL_ANIM_MS;
 }
 
@@ -4650,6 +4699,16 @@ static void btlStartCapture() {
 // full. Nothing else needs to be written for that part.
 static void btlFinishCapture() {
   btlBallUntil = 0;
+  if (btlFoeFled) {
+    // Gone for good, not just a costed turn -- ends the fight the same way
+    // running does, minus the "you" fleeing sound.
+    btlFreeSprites();
+    audioMusic(MUS_NONE);
+    if (btlLink) { lanLeave(); btlLink = false; lanOpen = true; }
+    battleOpen = false;
+    btlMenu = 0;
+    return;
+  }
   if (!btlCaptureWon) {
     btlSay(T(S_BTL_BROKE_FREE_FMT), dexName(btlFoe.dex));
     btlResolve(0);
@@ -4733,7 +4792,9 @@ void renderCapture() {
   gfx->drawCircle(bx, by, 5, UI_INK);
 
   if ((int)elapsed >= 2 * third) {
-    const char *r = btlCaptureWon ? T(S_BTL_CAUGHT_FMT) : T(S_BTL_BROKE_FREE_FMT);
+    const char *r = btlCaptureWon ? T(S_BTL_CAUGHT_FMT)
+                    : btlFoeFled  ? T(S_BTL_FLED_FMT)
+                                  : T(S_BTL_BROKE_FREE_FMT);
     char msg[40];
     snprintf(msg, sizeof(msg), r, dexName(btlFoe.dex));
     gfx->fillRoundRect(BTL_GRID_X, BTL_GRID_Y, 328, BTL_CELL_H, 10, UI_WHITE);
@@ -4771,7 +4832,7 @@ void battleTap(int16_t x, int16_t y) {
   }
   if (btlMenu == 0 && btlWild) {
     if (btlCellHit(0, x, y)) { sfxPlay(SFX_TAP); btlMenu = 1; return; }   // FIGHT
-    if (btlCellHit(1, x, y)) { sfxPlay(SFX_TAP); btlMenu = 2; return; }   // SWITCH
+    if (btlCellHit(1, x, y)) { sfxPlay(SFX_TAP); btlMenu = 2; btlSwitchPage = 0; return; }  // SWITCH
     if (btlCellHit(2, x, y)) { btlStartCapture(); return; }               // CAPTURE
     if (btlCellHit(3, x, y)) { btlRun(); return; }                        // RUN
     return;
@@ -4783,14 +4844,19 @@ void battleTap(int16_t x, int16_t y) {
       btlMenu = 1;                       // FIGHT
       return;
     }
-    if (btlCellHit(2, x, y)) { sfxPlay(SFX_TAP); btlMenu = 2; return; }
+    if (btlCellHit(2, x, y)) { sfxPlay(SFX_TAP); btlMenu = 2; btlSwitchPage = 0; return; }
     if (btlCellHit(3, x, y)) { btlRun(); return; }
     return;
   }
   if (btlMenu == 2) {
     if (btlBackTap(x, y)) return;
-    for (uint8_t i = 0; i < btlSquadN && i < 4; i++) {
-      if (!btlCellHit(i, x, y)) continue;
+    bool paged = btlSwitchPaged();
+    for (uint8_t cell = 0; cell < 4; cell++) {
+      if (!btlCellHit(cell, x, y)) continue;
+      if (paged && cell == 3) { btlSwitchPage ^= 1; sfxPlay(SFX_TAP); return; }
+      int8_t si = btlSwitchSlot(cell);
+      if (si < 0) return;  // hueco vacio en la ultima pagina, no hace nada
+      uint8_t i = (uint8_t)si;
       const Combatant &m = (i == btlSquadAt) ? btlYou : btlSquad[i];
       if (i == btlSquadAt || m.fainted()) { sfxPlay(SFX_DENY); return; }
       sfxPlay(SFX_TAP);
@@ -6016,10 +6082,10 @@ static void menuRowLabel(int i, char *out, size_t n) {
       case 0: snprintf(out, n, "%s", T(S_STATS)); break;
       case 1: snprintf(out, n, T(S_POKEDEX_FMT), pet.registeredCount(), DEX_COUNT); break;
       case 2: snprintf(out, n, "%s", T(S_SETTINGS)); break;
-      default: snprintf(out, n, "%s", T(S_RETIRE)); break;
+      default: snprintf(out, n, "%s", T(S_WILD_BATTLE)); break;
     }
   } else if (i == 0) {
-    snprintf(out, n, "%s", T(S_WILD_BATTLE));
+    snprintf(out, n, "%s", T(S_RETIRE));
   } else {
     out[0] = 0;
   }
@@ -6047,8 +6113,8 @@ void drawMenu() {
     if (menuPage == 1 && i > 0 && !close) continue;   // empty slot: nothing drawn
     int y = MENU_ROW_Y(i);
     bool dead = close ? false :
-                (menuPage == 0 && i == 3 && !pet.canRetireNow()) ||   // an egg or a companion
-                (menuPage == 1 && i == 0 && (pet.isEgg() || pet.ceremony != CER_NONE));
+                (menuPage == 0 && i == 3 && (pet.isEgg() || pet.ceremony != CER_NONE)) ||
+                (menuPage == 1 && i == 0 && !pet.canRetireNow());   // an egg or a companion
     gfx->fillRoundRect(MENU_X + 18, y, MENU_W - 36, MENU_ROW_H, 12,
                        close || dead ? UI_TRACK : UI_BG_DAY);
     gfx->drawRoundRect(MENU_X + 18, y, MENU_W - 36, MENU_ROW_H, 12, UI_INK);

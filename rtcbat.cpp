@@ -110,7 +110,7 @@ bool pwrShortPressed() {
 // (brillo segun USB, icono de bateria, etc).
 // ---------------------------------------------------------------------------
 
-bool batBegin() { return false; }
+bool batBegin() { return true; }  // no hay PMU que iniciar, pero el ADC ya esta listo
 
 void pmuEnablePanel() {
   // El rail de la pantalla se controla por GPIO (1.43: LCD_EN) o ya viene
@@ -118,8 +118,38 @@ void pmuEnablePanel() {
   // esquematico) -- no hace falta nada aqui en ninguna de las dos.
 }
 
-int batPercent() { return -1; }      // sin PMU: no se puede leer % de bateria
-bool batCharging() { return false; }
+// Sin PMU no hay lectura de % por I2C, pero SI hay un divisor resistivo en
+// BAT_ADC (100K/200K, igual en el esquematico de la 1.43 y el de la 2.8"
+// redonda -- mismo diseno de referencia reutilizado). Se asume que el
+// resistor de 200K va a GND (relacion 2/3: 4.2V de bateria llena -> 2.8V en
+// el pin, aprovechando mejor el rango del ADC que la relacion 1/3 al reves,
+// que dejaria solo 1.4V) -- ESTO NO ESTA CONFIRMADO CON UN VOLTIMETRO, es la
+// orientacion mas probable segun el uso del ADC, no algo leido directo del
+// esquematico. Si el porcentaje mostrado no cuadra con una bateria real,
+// este es el primer numero a revisar (probar *3 en vez de *3/2).
+static int readBatPercent() {
+  uint32_t mv = analogReadMilliVolts(BAT_ADC);
+  uint32_t battMv = mv * 3 / 2;
+  // Curva LiPo aproximada (no lineal: la tension cae rapido al final). Sin
+  // placa para calibrar contra un voltimetro real, es una aproximacion
+  // razonable, no una medicion exacta.
+  static const uint16_t PTS_MV[]  = { 3300, 3500, 3600, 3700, 3800, 3900, 4000, 4100, 4200 };
+  static const uint8_t  PTS_PCT[] = {    0,   10,   20,   35,   50,   65,   80,   90,  100 };
+  const int N = sizeof(PTS_MV) / sizeof(PTS_MV[0]);
+  if (battMv <= PTS_MV[0]) return 0;
+  if (battMv >= PTS_MV[N - 1]) return 100;
+  for (int i = 1; i < N; i++) {
+    if (battMv <= PTS_MV[i]) {
+      uint32_t span = PTS_MV[i] - PTS_MV[i - 1];
+      uint32_t into = battMv - PTS_MV[i - 1];
+      return PTS_PCT[i - 1] + (int)((PTS_PCT[i] - PTS_PCT[i - 1]) * into / span);
+    }
+  }
+  return 100;
+}
+
+int batPercent() { return readBatPercent(); }
+bool batCharging() { return false; }  // el STAT del cargador no llega a ningun GPIO en estas placas
 bool usbPresent() { return true; }   // sin deteccion VBUS: asumimos alimentado
 
 void pwrSetup() {

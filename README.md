@@ -3,7 +3,7 @@
 [![Flash in browser](https://img.shields.io/badge/flash-in%20browser-FF6B00?logo=googlechrome&logoColor=white)](https://dylanpdao.github.io/TamaPoke/web/)
 [![MakerWorld](https://img.shields.io/badge/MakerWorld-3D%20case-00AE42?logo=bambulab&logoColor=white)](https://makerworld.com/es/models/2937822-tamapoke-a-pokemon-pokeball-tamagotchi)
 ![Board](https://img.shields.io/badge/board-ESP32--S3%20round%20AMOLED-E7352C?logo=espressif&logoColor=white)
-![Firmware](https://img.shields.io/badge/firmware-v3.16-8A2BE2)
+![Firmware](https://img.shields.io/badge/firmware-v3.17-8A2BE2)
 ![Code](https://img.shields.io/badge/code-MIT-blue)
 ![Languages](https://img.shields.io/badge/languages-6-FFCB05)
 [![Stars](https://img.shields.io/github/stars/DylanPDao/TamaPoke?style=flat&logo=github&color=yellow)](https://github.com/DylanPDao/TamaPoke/stargazers)
@@ -323,12 +323,12 @@ a checklist you tick once:
 
 ### Wild encounters
 
-**WILD**, the second page of the menu (swipe the menu panel sideways to reach
-it), starts a one-off fight against a random creature from your current
-region -- always **common rarity**, never an evolution-only or legendary
-species, and never shiny. Its level is rolled near your own live pet's
-(`level ± 3`, clamped to 1–100): not gym-capped, since a wild fight is not
-part of the badge ladder.
+**WILD** is on the menu's first page (row 4 -- it swapped places with RETIRE,
+which is now on the second page), and starts a one-off fight against a random
+creature from your current region -- always **common rarity**, never an
+evolution-only or legendary species, and never shiny. Its level is rolled near
+your own live pet's (`level ± 3`, clamped to 1–100): not gym-capped, since a
+wild fight is not part of the badge ladder.
 
 The battle menu gains a fourth option, **CAPTURE**, which throws a Pokeball.
 The catch chance depends on the wild creature's remaining HP:
@@ -339,12 +339,16 @@ The catch chance depends on the wild creature's remaining HP:
 | Near fainting | **85 %** |
 | (linear in between) | `15 + 70 × (missing HP / max HP)` |
 
-A miss costs the turn -- the wild creature gets to act, same as switching.
+A miss usually just costs the turn -- the wild creature gets to act, same as
+switching -- but there is also a flat **20 %** chance (`CAPTURE_FLEE_PCT`) on
+a miss that it flees outright instead, ending the fight for good. Both are
+decided the instant the ball is thrown, not when the animation finishes.
 A catch ends the fight immediately: the creature joins your **party** if
 there is room, else the **box**, else you are dropped into the same
 "choose who to replace" screen a farewell already uses when both are full.
 Its IVs roll the same 8–31 spread (no care-streak bonus, and no legendary
 guarantee — wild encounters are always common) a freshly hatched egg would.
+It is also registered in the **Pokedex** the moment it is banked.
 
 ### Retiring a creature early
 

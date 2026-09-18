@@ -50,19 +50,21 @@ Arduino_DataBus *bus = new Arduino_ESP32QSPI(
   LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
 // PORTAGE 1.43: driver SH8601 en vez de CO5300. Arduino_GFX expone
 // Arduino_SH8601 con la misma firma que Arduino_CO5300 (mismo framebuffer
-// QSPI de 466x466), pero VERIFICAR los offsets/parametros extra (6,0,0,0 en
-// el original) contra el ejemplo oficial de Waveshare para la 1.43 -- pueden
-// diferir entre paneles SH8601 de distintos lotes.
+// QSPI), pero el offset (6,0,0,0) del original es del panel CO5300 de la
+// 1.75 y NO se traslada al SH8601: en el ejemplo oficial de LilyGO para un
+// panel SH8601 466x466 equivalente (T-Display-S3-AMOLED-1.43-1.75,
+// variante DO0143FAT01) el offset es (0,0,0,0) -- el 6,0,0,0 de ese mismo
+// repo es la rama CO5300 (H0175Y003AM/DO0143FMST10), no la SH8601.
 Arduino_SH8601 *panel = new Arduino_SH8601(
-  bus, LCD_RESET, 0 /*rotation*/, LCD_WIDTH, LCD_HEIGHT, 6, 0, 0, 0);
+  bus, LCD_RESET, 0 /*rotation*/, LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
 // Framebuffer completo en PSRAM: dibujamos todo y hacemos flush() (sin parpadeo)
 Arduino_Canvas *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, panel);
 
-// PORTAGE 1.43: FT3168 en vez de CST9217. TouchDrvFT6X36 cubre la familia
-// FocalTech FT62xx/FT3267/FT3168 en SensorLib -- A VERIFICAR: confirmar el
-// nombre de clase exacto en los ejemplos locales de la libreria instalada
-// (Arduino IDE -> File -> Examples -> SensorLib -> Touch_*), puede llamarse
-// TouchDrvFT3267 en versiones recientes.
+// PORTAGE 1.43: FT3168 en vez de CST9217. Confirmado en el codigo fuente de
+// SensorLib: TouchDrvFocalTech.hpp agrupa toda la familia FocalTech
+// FT3267/FT5206/FT6X36 (misma familia que el FT3168) bajo esta unica clase,
+// con FT3267_SLAVE_ADDRESS == FT6X36_SLAVE_ADDRESS == 0x38 -- no existe una
+// TouchDrvFT3168 ni TouchDrvFT3267 separada.
 TouchDrvFT6X36 touch;
 Pet pet;
 
@@ -724,9 +726,9 @@ void setup() {
   if (!gfx->begin(80000000)) Serial.println("gfx->begin() fallo");
   panel->setBrightness(180);
 
-  // PORTAGE 1.43: direccion I2C del FT3168 -- A VERIFICAR (el FT3168 suele
-  // responder en 0x38, distinto del 0x5A del CST9217 original). Si el touch
-  // no se detecta, es el primer valor a comprobar.
+  // PORTAGE 1.43: direccion I2C del FT3168 -- 0x38, confirmado en el codigo
+  // fuente de SensorLib (FT3267_SLAVE_ADDRESS/FT6X36_SLAVE_ADDRESS), distinto
+  // del 0x5A del CST9217 original.
   if (TP_RESET >= 0) touch.setPins(TP_RESET, TP_INT);
   bool touchOk = false;
   for (int i = 0; i < 3 && !touchOk; i++) {  // a veces falla al primer intento
@@ -740,10 +742,13 @@ void setup() {
   touch.setMaxCoordinates(LCD_WIDTH, LCD_HEIGHT);
   touch.setMirrorXY(true, true);  // el panel esta montado girado 180 grados (a confirmar en esta placa)
   // INT activo-bajo: salta cuando hay datos. Gatea las lecturas I2C (ver loop).
-  // PORTAGE 1.43: TP_INT no esta confirmado en el pinout publico (=-1 en
-  // pin_config.h hasta verificar el esquematico). Sin IRQ, handleTouch() cae
-  // a polling puro a 50Hz (ver gTouchIrq mas abajo) -- funciona pero gasta
-  // mas ciclos I2C que la version con interrupcion.
+  // PORTAGE 1.43: TP_INT/TP_RESET no existen en esta placa -- confirmado en
+  // el esquematico oficial (el conector J9 "LCD" solo expone TP_SDA/TP_SCL;
+  // el tactil vive en el modulo de pantalla junto con IMU y RTC en el mismo
+  // bus I2C, sin lineas propias de INT/RESET). pin_config.h los deja en -1 a
+  // proposito, no como placeholder pendiente. Sin IRQ, handleTouch() cae a
+  // polling puro a 50Hz (ver gTouchIrq mas abajo) -- funciona pero gasta mas
+  // ciclos I2C que una interrupcion.
   if (TP_INT >= 0) {
     pinMode(TP_INT, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(TP_INT), touchIsr, FALLING);

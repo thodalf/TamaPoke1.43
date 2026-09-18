@@ -22,11 +22,14 @@
 // Tactil capacitivo FT3168, bus I2C compartido con IMU y RTC
 #define IIC_SDA 47
 #define IIC_SCL 48
-// TP_INT / TP_RESET: NO confirmados en la tabla de pines publica de Waveshare.
-// A verificar contra el esquematico antes de flashear:
-// https://files.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.43/ESP32-S3-Touch-AMOLED-1.43-Schematic.pdf
-#define TP_INT -1    // PLACEHOLDER -- confirmar en el esquematico
-#define TP_RESET -1  // PLACEHOLDER -- confirmar en el esquematico
+// TP_INT / TP_RESET: confirmado contra el esquematico oficial que esta placa
+// NO los expone como pines propios -- el conector J9 "LCD" (modulo de
+// pantalla con tactil integrado) solo saca TP_SDA/TP_SCL hacia el bus I2C
+// compartido con el IMU y el RTC. No son placeholders pendientes de
+// verificar: el touch funciona en polling puro (ver handleTouch en
+// TamaPoke.ino), que es el modo correcto para esta placa.
+#define TP_INT -1
+#define TP_RESET -1
 
 // IMU QMI8658 (mismo bus I2C)
 #define IMU_INT 8

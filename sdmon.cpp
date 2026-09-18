@@ -3,7 +3,19 @@
 #include "pin_config.h"
 #include "pet.h"   // gRegionArt, REGIONS -- the mask this narrows
 #include <FS.h>
-#include <SD_MMC.h>
+#include <SD.h>
+#include <SPI.h>
+
+// PORTAGE 1.43: pin_config.h ya documentaba que esta ranura TF esta cableada
+// en SPI dedicado (CLK/CMD=MOSI/DATA=MISO/CS), no en SDMMC 4-bit -- pero el
+// codigo seguia usando SD_MMC (protocolo nativo SD sobre el periferico SDMMC
+// del chip), que nunca puede hablar con un socket cableado para SPI: el
+// nativo no usa CS en absoluto, y aqui SDMMC_CS estaba definido pero sin uso.
+// Sintoma en el board real: "sdmmc_init_ocr: send_op_cond (1) returned
+// 0x107" (ESP_ERR_TIMEOUT) -- la tarjeta nunca responde al protocolo nativo.
+// Bus SPI propio (no el mismo que la pantalla) para no compartir cola de
+// transacciones con el framebuffer QSPI.
+static SPIClass sdSPI(HSPI);
 
 bool sdReady = false;
 bool sdDirty = false;
@@ -21,10 +33,10 @@ bool PmdMon::load(int16_t dexNum, bool shiny) {
 
   char path[28];
   snprintf(path, sizeof(path), "/mons/p%s%03u.bin", shiny ? "s" : "", (unsigned)dexNum);
-  File f = SD_MMC.open(path, FILE_READ);
+  File f = SD.open(path, FILE_READ);
   if (!f && shiny) {  // sin shiny PMD: usa el normal
     snprintf(path, sizeof(path), "/mons/p%03u.bin", (unsigned)dexNum);
-    f = SD_MMC.open(path, FILE_READ);
+    f = SD.open(path, FILE_READ);
   }
   if (!f) return false;
 
@@ -95,7 +107,7 @@ void PmdMon::unload() {
 
 bool SdThumbs::load() {
   if (!sdReady) return false;
-  File f = SD_MMC.open("/mons/thumbs.bin", FILE_READ);
+  File f = SD.open("/mons/thumbs.bin", FILE_READ);
   if (!f) {
     Serial.println("sin thumbs.bin (galeria sin miniaturas)");
     return false;
@@ -143,7 +155,7 @@ void sdScanRegionArt(bool verbose) {
     for (int i = 0; i < 3 && all; i++) {
       char path[28];
       snprintf(path, sizeof(path), "/mons/p%03u.bin", (unsigned)probe[i]);
-      File f = SD_MMC.open(path, FILE_READ);
+      File f = SD.open(path, FILE_READ);
       if (!f) all = false; else f.close();
     }
     if (all) mask |= (uint16_t)(1u << r);
@@ -154,11 +166,11 @@ void sdScanRegionArt(bool verbose) {
 }
 
 bool sdBegin() {
-  SD_MMC.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_DATA);
-  sdReady = SD_MMC.begin("/sdcard", true /* modo 1-bit */, true /* formatea si no monta */);
+  sdSPI.begin(SDMMC_CLK, SDMMC_DATA /* MISO */, SDMMC_CMD /* MOSI */, SDMMC_CS);
+  sdReady = SD.begin(SDMMC_CS, sdSPI, 4000000, "/sdcard", 5, true /* formatea si no monta */);
   if (sdReady) {
-    Serial.printf("SD montada: %llu MB\n", SD_MMC.cardSize() / (1024ULL * 1024ULL));
-    SD_MMC.mkdir("/mons");
+    Serial.printf("SD montada: %llu MB\n", SD.cardSize() / (1024ULL * 1024ULL));
+    SD.mkdir("/mons");
     sdScanRegionArt();
   } else {
     Serial.println("SD no detectada (el juego usa los sprites de flash)");
@@ -173,10 +185,10 @@ bool SdMon::load(int16_t dexNum, bool shiny) {
 
   char path[24];
   snprintf(path, sizeof(path), "/mons/%s%03u.bin", shiny ? "s" : "", (unsigned)dexNum);
-  File f = SD_MMC.open(path, FILE_READ);
+  File f = SD.open(path, FILE_READ);
   if (!f && shiny) {  // sin variante shiny: usa la normal
     snprintf(path, sizeof(path), "/mons/%03u.bin", (unsigned)dexNum);
-    f = SD_MMC.open(path, FILE_READ);
+    f = SD.open(path, FILE_READ);
   }
   if (!f) {
     Serial.printf("no existe %s\n", path);
@@ -256,7 +268,7 @@ bool sdSerialCommand(const String &line) {
       return true;
     }
     if (!path.startsWith("/")) path = "/" + path;
-    File f = SD_MMC.open(path, FILE_WRITE);
+    File f = SD.open(path, FILE_WRITE);
     if (!f) {
       Serial.println("ERR");
       return true;
@@ -284,7 +296,7 @@ bool sdSerialCommand(const String &line) {
     Serial.println(remaining == 0 ? "DONE" : "ERR");
     return true;
   } else if (line == "LS") {
-    File dir = SD_MMC.open("/mons");
+    File dir = SD.open("/mons");
     if (dir) {
       File e;
       while ((e = dir.openNextFile())) {

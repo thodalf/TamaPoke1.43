@@ -19,6 +19,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <Preferences.h>
 #include "Arduino_GFX_Library.h"
 #include "TouchDrvFT6X36.hpp"  // familia FocalTech (FT3267/FT3168) en SensorLib
 #include "pin_config.h"
@@ -44,19 +45,20 @@
 
 // Version del firmware. Subir este numero en cada release (y manifest.json para
 // el instalador web). Se muestra en la pantalla de ajustes y por serie al arrancar.
-#define FW_VERSION "3.15"
+#define FW_VERSION "3.16"
 
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
   LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
 // PORTAGE 1.43: driver SH8601 en vez de CO5300. Arduino_GFX expone
 // Arduino_SH8601 con la misma firma que Arduino_CO5300 (mismo framebuffer
-// QSPI), pero el offset (6,0,0,0) del original es del panel CO5300 de la
-// 1.75 y NO se traslada al SH8601: en el ejemplo oficial de LilyGO para un
-// panel SH8601 466x466 equivalente (T-Display-S3-AMOLED-1.43-1.75,
-// variante DO0143FAT01) el offset es (0,0,0,0) -- el 6,0,0,0 de ese mismo
-// repo es la rama CO5300 (H0175Y003AM/DO0143FMST10), no la SH8601.
+// QSPI). col_offset1/row_offset1 (activos en rotation=0, ver Arduino_TFT::
+// setRotation) terminan siendo el x_start/y_start que setAddrWindow() suma a
+// cada CASET/PASET -- 6,0 aqui para que coincida con el CASET que se manda a
+// mano en setup() (ver el comentario ahi: la pantalla en negro NO era por
+// este offset -- 0,0,0,0 y 8,0,0,0 se probaron en placa y ambos daban negro
+// -- sino por dos comandos de init que le faltaban a este driver generico).
 Arduino_SH8601 *panel = new Arduino_SH8601(
-  bus, LCD_RESET, 0 /*rotation*/, LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
+  bus, LCD_RESET, 0 /*rotation*/, LCD_WIDTH, LCD_HEIGHT, 6, 0, 0, 0);
 // Framebuffer completo en PSRAM: dibujamos todo y hacemos flush() (sin parpadeo)
 Arduino_Canvas *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, panel);
 
@@ -169,9 +171,18 @@ bool releaseConfirm = false;
 uint32_t partyBannerUntil = 0;   // "<name> joined the party!"
 char partyBannerName[14] = "";
 #define PARTY_CELL_W 150
-#define PARTY_CELL_H 70
+#define PARTY_CELL_H 58
+#define PARTY_GRID_GAP 6         // renderParty() y partyTap() usan el MISMO valor
 #define PARTY_GRID_X 78
-#define PARTY_GRID_Y 88
+#define PARTY_GRID_Y 126
+// tarjeta del pokemon activo, encima de la rejilla de bancados -- pedido por
+// el jugador: "que el pokemon activo forme parte del equipo de 6". Es solo
+// visual (no cuenta para el "EQUIPO x/6", que sigue siendo solo bancados, ni
+// para el hueco que ocupa en combate, donde ya iba incluido).
+#define LIVE_SLOT_Y 72
+#define LIVE_SLOT_H 46
+#define LIVE_SLOT_X PARTY_GRID_X
+#define LIVE_SLOT_W (PARTY_CELL_W * 2 + 10)
 
 bool clockOpen = false;       // pantalla de ajuste de hora (deslizar abajo)
 int clockH = 12, clockM = 0;  // hora en edicion
@@ -696,6 +707,30 @@ int16_t tX0, tY0, tXl, tYl; // gesto en curso (inicio y ultima posicion)
 uint32_t tStart = 0;
 bool holdFired = false;
 
+// preferencia de brillo del jugador (0..10, ver SETTINGS), igual patron que
+// audioVolume() en audio.cpp: cacheado tras la primera lectura de Preferences.
+static uint8_t gBri = 7;
+static bool gBriLoaded = false;
+uint8_t dispBrightness() {
+  if (!gBriLoaded) {
+    Preferences p;
+    p.begin("tamapoke", true);
+    gBri = p.getUChar("bri", 7);
+    if (gBri > 10) gBri = 7;
+    p.end();
+    gBriLoaded = true;
+  }
+  return gBri;
+}
+void setDispBrightness(uint8_t v) {
+  gBri = v > 10 ? 10 : v;
+  gBriLoaded = true;
+  Preferences p;
+  p.begin("tamapoke", false);
+  p.putUChar("bri", gBri);
+  p.end();
+}
+
 void setup() {
   Serial.setRxBufferSize(8192);  // la transferencia a SD llega en bloques de 2 KB
   Serial.begin(115200);
@@ -717,13 +752,44 @@ void setup() {
   // GPIO (LCD_EN) en vez de pmuEnablePanel() (que ahora es un no-op, ver
   // rtcbat.cpp). Hay que hacerlo ANTES de gfx->begin() igual que en el original.
   pinMode(LCD_EN, OUTPUT);
+  // El esquematico oficial muestra R9, en la red OLED_EN, como "NC" (no
+  // montada) -- probado en placa: ni HIGH ni LOW cambia nada, confirmando que
+  // este GPIO no llega realmente al panel en esta placa. Se deja en HIGH por
+  // si una revision futura si la monta.
   digitalWrite(LCD_EN, HIGH);
-  delay(10);
+  delay(150);
   pmuEnablePanel();  // no-op en esta placa, se deja por compatibilidad
 
-  // QSPI a 80MHz (por defecto 40): el flush del framebuffer es el cuello de
-  // botella del fps (~56ms a 40MHz). Si el panel mostrara basura, bajar a 40M.
-  if (!gfx->begin(80000000)) Serial.println("gfx->begin() fallo");
+  // QSPI a 40MHz: no probado a 80 con el arreglo de abajo, subir con cuidado.
+  if (!gfx->begin(40000000)) Serial.println("gfx->begin() fallo");
+
+  // El driver generico Arduino_SH8601 (GFX Library for Arduino) NO manda dos
+  // comandos que el ejemplo OFICIAL de Waveshare para este mismo chip SI manda
+  // antes que cualquier otro (repo waveshareteam/ESP32-S3-Touch-AMOLED-1.43C,
+  // bsp_lcd_init()): 0xFE=0x00 (seleccion de pagina del fabricante) y
+  // 0xC4=0x80 (control de modo SPI, que pone al chip en modo QSPI). Sin esto
+  // la pantalla queda completamente negra -- confirmado en placa: probado sin
+  // esto con varios offsets de panel y las dos polaridades de LCD_EN, sin
+  // ningun cambio, y con esto funciona a la primera. Reenviamos la secuencia
+  // oficial completa a mano, en el mismo orden que bsp_lcd_init().
+  bus->beginWrite();
+  bus->writeC8D8(0xFE, 0x00);
+  bus->writeC8D8(0xC4, 0x80);
+  bus->writeC8D8(0x3A, 0x55);
+  bus->writeC8D8(0x35, 0x00);
+  bus->writeC8D8(0x53, 0x20);
+  bus->writeC8D8(0x51, 0xFF);
+  bus->writeC8D8(0x36, 0xC0);
+  bus->writeC8D8(0x63, 0xFF);
+  bus->writeC8D16D16(0x2A, 0x0006, 0x01D7);
+  bus->writeC8D16D16(0x2B, 0x0000, 0x01D1);
+  bus->writeCommand(0x11);
+  bus->endWrite();
+  delay(120);
+  bus->beginWrite();
+  bus->writeCommand(0x29);
+  bus->endWrite();
+
   panel->setBrightness(180);
 
   // PORTAGE 1.43: direccion I2C del FT3168 -- 0x38, confirmado en el codigo
@@ -913,7 +979,15 @@ void updateBrightness(uint32_t now) {
   }
   uint32_t idle = now - lastInteract;
   dimStage = (idle > 300000) ? 2 : (idle > 90000) ? 1 : 0;
-  uint8_t target = pet.sleeping ? 25 : (usbPresent() ? 180 : 145);
+  // preferencia de brillo del jugador (SETTINGS, 0..10) -> 20..240
+  uint8_t base = 20 + (uint16_t)dispBrightness() * 22;
+  // el jugador pidio que la pantalla se vea MAS brillante mientras el bicho
+  // duerme, para verlo bien -- antes bajaba en vez de subir.
+  uint8_t target = pet.sleeping ? (uint8_t)min(255, (int)base + 60)
+                                : (usbPresent() ? base : (uint8_t)(base * 4 / 5));
+  // proteccion del AMOLED tras un rato sin tocar la pantalla: valores fijos y
+  // bajos, independientes de la preferencia -- esto puede durar horas (el
+  // bicho duerme toda la noche) y no debe arriesgar quemado de panel.
   if (dimStage == 1) target = pet.sleeping ? 10 : 60;
   else if (dimStage == 2) target = 8;
   if (screenOff) target = 0;
@@ -1609,7 +1683,7 @@ void partyTap(int16_t x, int16_t y) {
   }
   for (int i = 0; i < PARTY_SLOTS; i++) {
     int cx0 = PARTY_GRID_X + (i % 2) * (PARTY_CELL_W + 10);
-    int cy0 = PARTY_GRID_Y + (i / 2) * (PARTY_CELL_H + 8);
+    int cy0 = PARTY_GRID_Y + (i / 2) * (PARTY_CELL_H + PARTY_GRID_GAP);
     if (x < cx0 || x > cx0 + PARTY_CELL_W || y < cy0 || y > cy0 + PARTY_CELL_H) continue;
     if (boxSel) {                    // a box creature is waiting for a slot
       party.swapPartyBox(i, boxSel - 1);
@@ -2976,7 +3050,12 @@ void drawClockBtn(int x, int y, const char *l) {
 }
 
 // pildoras de idioma centradas en y; rellena la activa
-#define LANG_PILL_Y 296
+// PORTAGE 1.43: fila de sonido/idioma subida (296->266) y filas de arriba
+// comprimidas para dejar sitio a BRI_ROW_Y, la nueva fila de brillo, sin
+// mover el boton OK, CANCELAR ni la version -- esos ya usaban casi todo el
+// margen contra el borde del panel redondo (comprobado con el texto FR mas
+// largo, "glisse haut: annuler") y no tenian donde ceder.
+#define LANG_PILL_Y 266
 #define LANG_PILL_H 30
 #define LANG_PILL_X 336          // pildora de idioma (cicla los 6 al tocar)
 #define LANG_PILL_W 96
@@ -2985,6 +3064,9 @@ void drawClockBtn(int x, int y, const char *l) {
 #define VOL_MINUS_X 146
 #define VOL_PLUS_X 276
 #define VOL_BTN_W 48
+// fila de brillo, debajo de la de sonido/idioma -- mismas X que el mixer de
+// volumen, para que ambas filas queden alineadas en columnas.
+#define BRI_ROW_Y (LANG_PILL_Y + LANG_PILL_H + 8)
 static const char *const LANG_CODES[LANG_COUNT] = { "ES", "EN", "FR", "DE", "IT", "PT" };
 
 void renderClock() {
@@ -2998,18 +3080,18 @@ void renderClock() {
   char t[8];
   snprintf(t, sizeof(t), "%02d:%02d", clockH, clockM);
   gfx->setTextSize(7);
-  gfx->setCursor(CX - 105, 108);
+  gfx->setCursor(CX - 105, 100);
   gfx->print(t);
 
-  drawClockBtn(104, 190, "-");  // hora -
-  drawClockBtn(170, 190, "+");  // hora +
-  drawClockBtn(252, 190, "-");  // min -
-  drawClockBtn(318, 190, "+");  // min +
+  drawClockBtn(104, 174, "-");  // hora -
+  drawClockBtn(170, 174, "+");  // hora +
+  drawClockBtn(252, 174, "-");  // min -
+  drawClockBtn(318, 174, "+");  // min +
   gfx->setTextSize(2);
   gfx->setTextColor(UI_TRACK);
-  gfx->setCursor(120, 256);
+  gfx->setCursor(120, 240);
   gfx->print(T(S_HOUR));
-  gfx->setCursor(276, 256);
+  gfx->setCursor(276, 240);
   gfx->print(T(S_MIN));
 
   // interruptor de sonido (izquierda de la fila de idioma)
@@ -3058,6 +3140,32 @@ void renderClock() {
   gfx->setCursor(LANG_PILL_X + (LANG_PILL_W - (int)strlen(lp) * 12) / 2, LANG_PILL_Y + 8);
   gfx->print(lp);
 
+  // brillo: mismo patron visual que el volumen (menos, nivel, mas), en su
+  // propia fila justo debajo -- alineado en las mismas X para que las dos
+  // filas se lean como una tabla.
+  {
+    uint8_t b = dispBrightness();
+    for (int i = 0; i < 2; i++) {
+      int bx = i ? VOL_PLUS_X : VOL_MINUS_X;
+      bool live = i ? (b < 10) : (b > 0);
+      gfx->fillRoundRect(bx, BRI_ROW_Y, VOL_BTN_W, LANG_PILL_H, 8,
+                         live ? UI_WHITE : UI_TRACK);
+      gfx->drawRoundRect(bx, BRI_ROW_Y, VOL_BTN_W, LANG_PILL_H, 8, UI_INK);
+      gfx->setTextColor(live ? UI_INK : 0x8410);
+      gfx->setTextSize(2);
+      gfx->setCursor(bx + VOL_BTN_W / 2 - 6, BRI_ROW_Y + 8);
+      gfx->print(i ? "+" : "-");
+    }
+    char bl[12];
+    snprintf(bl, sizeof(bl), T(S_BRI_FMT), b);
+    gfx->setTextColor(UI_INK);
+    gfx->setTextSize(1);
+    gfx->setCursor(210 + (56 - (int)strlen(bl) * 6) / 2, BRI_ROW_Y + 4);
+    gfx->print(bl);
+    gfx->fillRoundRect(210, BRI_ROW_Y + 18, 56, 8, 3, UI_TRACK);
+    gfx->fillRoundRect(210, BRI_ROW_Y + 18, 56 * b / 10, 8, 3, UI_BAR_OK);
+  }
+
   gfx->fillRoundRect(133, 340, 200, 48, 14, UI_BAR_OK);
   gfx->setTextColor(UI_BG_DAY);
   gfx->setTextSize(3);
@@ -3079,7 +3187,7 @@ void renderClock() {
 }
 
 void clockTap(int16_t x, int16_t y) {
-  if (y >= 190 && y <= 248) {  // fila de botones +/-
+  if (y >= 174 && y <= 232) {  // fila de botones +/-
     if (x >= 104 && x < 162) clockH = (clockH + 23) % 24;
     else if (x >= 170 && x < 228) clockH = (clockH + 1) % 24;
     else if (x >= 252 && x < 310) clockM = (clockM + 59) % 60;
@@ -3104,6 +3212,18 @@ void clockTap(int16_t x, int16_t y) {
     }
     if (x >= LANG_PILL_X && x < LANG_PILL_X + LANG_PILL_W) {  // cicla idioma
       setLang((Lang)((gLang + 1) % LANG_COUNT));
+      sfxPlay(SFX_TAP);
+      return;
+    }
+  }
+  if (y >= BRI_ROW_Y && y <= BRI_ROW_Y + LANG_PILL_H) {
+    if (x >= VOL_MINUS_X && x < VOL_MINUS_X + VOL_BTN_W) {
+      if (dispBrightness() > 0) setDispBrightness(dispBrightness() - 1);
+      sfxPlay(SFX_TAP);
+      return;
+    }
+    if (x >= VOL_PLUS_X && x < VOL_PLUS_X + VOL_BTN_W) {
+      if (dispBrightness() < 10) setDispBrightness(dispBrightness() + 1);
       sfxPlay(SFX_TAP);
       return;
     }
@@ -4298,7 +4418,15 @@ static void btlFinishCapture() {
   m.level = btlWildFoe.level();
   m.ivAtk = btlWildFoe.ivAtk; m.ivDef = btlWildFoe.ivDef;
   m.ivSpe = btlWildFoe.ivSpe; m.ivHp = btlWildFoe.ivHp;
+  m.shiny = btlWildFoe.shiny ? 1 : 0;
   for (int i = 0; i < MOVE_SLOTS; i++) m.moves[i] = btlWildFoe.moves[i];
+  // Wild foes are built via btlWildFoe.dbgHatchAs() (wildFoeFromSpecies()),
+  // a SCRATCH Pet whose own registerSpecies() call inside hatch() only ever
+  // touches ITS OWN in-memory dexReg -- never the player's. Fighting a wild
+  // creature was therefore never registering it, caught or not; register the
+  // ACTUAL player's Pokedex here, explicitly, now that it is really banked.
+  pet.registerSpecies(m.dex, m.shiny != 0);
+  pet.saveNow();   // que sobreviva a un reinicio ya mismo, no en el siguiente save incidental
   pet.endedMon = m;
   pet.endedKind = CER_CAUGHT;
 }
@@ -5894,18 +6022,50 @@ void drawPartySlot(int i, int x, int y) {
   const char *nm = m.nick[0] ? m.nick : dexName(m.dex);
   gfx->setTextColor(d.accent);
   gfx->setTextSize(1);
-  gfx->setCursor(x + 62, y + 18);
+  gfx->setCursor(x + 62, y + 15);
   gfx->print(nm);
   if (m.shiny) {
     gfx->setTextColor(UI_BAR_WARN);
-    gfx->setCursor(x + 62 + (int)strlen(nm) * 6 + 3, y + 18);
+    gfx->setCursor(x + 62 + (int)strlen(nm) * 6 + 3, y + 15);
     gfx->print("*");
   }
   char lv[12];
   snprintf(lv, sizeof(lv), T(S_LVL_FMT), (unsigned)m.level);
   gfx->setTextColor(UI_INK);
   gfx->setTextSize(2);
-  gfx->setCursor(x + 62, y + 36);
+  gfx->setCursor(x + 62, y + 30);
+  gfx->print(lv);
+}
+
+// El pokemon activo, en su propia tarjeta encima de la rejilla de bancados
+// (ver LIVE_SLOT_*). Solo visual: no es tocable ni cuenta para "EQUIPO x/6".
+void drawLivePetSlot(int x, int y) {
+  gfx->fillRoundRect(x, y, LIVE_SLOT_W, LIVE_SLOT_H, 10, UI_BAR_OK);
+  gfx->drawRoundRect(x, y, LIVE_SLOT_W, LIVE_SLOT_H, 10, UI_INK);
+  if (pet.isEgg()) {
+    gfx->setTextColor(UI_BG_DAY);
+    gfx->setTextSize(2);
+    gfx->setCursor(x + (LIVE_SLOT_W - (int)strlen(T(S_EGG_HDR)) * 12) / 2, y + LIVE_SLOT_H / 2 - 8);
+    gfx->print(T(S_EGG_HDR));
+    return;
+  }
+  const uint8_t *th = thumbs.get(pet.speciesId);
+  if (th) drawThumb(th, x - 6, y - 3, 1, false);
+  const char *nm = pet.nick[0] ? pet.nick : dexName(pet.speciesId);
+  gfx->setTextColor(UI_BG_DAY);
+  gfx->setTextSize(1);
+  gfx->setCursor(x + 62, y + 12);
+  gfx->print(nm);
+  if (pet.shiny) {
+    gfx->setTextColor(UI_BAR_WARN);
+    gfx->setCursor(x + 62 + (int)strlen(nm) * 6 + 3, y + 12);
+    gfx->print("*");
+  }
+  char lv[12];
+  snprintf(lv, sizeof(lv), T(S_LVL_FMT), (unsigned)pet.level());
+  gfx->setTextColor(UI_BG_DAY);
+  gfx->setTextSize(2);
+  gfx->setCursor(x + 62, y + 26);
   gfx->print(lv);
 }
 
@@ -5954,9 +6114,13 @@ void renderParty() {
     gfx->print(T(S_PARTY_FULL));
   }
 
+  // la tarjeta del activo se oculta si hay un aviso contextual en su mismo
+  // sitio (mid-swap desde la caja, o "equipo lleno, elige a quien sustituir")
+  if (!boxSel && !partyPick) drawLivePetSlot(LIVE_SLOT_X, LIVE_SLOT_Y);
+
   for (int i = 0; i < PARTY_SLOTS; i++) {
     int x = PARTY_GRID_X + (i % 2) * (PARTY_CELL_W + 10);
-    int y = PARTY_GRID_Y + (i / 2) * (PARTY_CELL_H + 8);
+    int y = PARTY_GRID_Y + (i / 2) * (PARTY_CELL_H + PARTY_GRID_GAP);
     drawPartySlot(i, x, y);
   }
 

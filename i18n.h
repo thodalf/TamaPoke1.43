@@ -143,6 +143,7 @@ enum StrId : uint8_t {
   // for this banked one. Unlike S_REVIVE, the incoming creature keeps ageing.
   S_MAKE_ACTIVE,
   S_MAKE_ACTIVE_HINT,  // why it is greyed: mid farewell/runaway/goodbye
+  S_BRI_FMT,        // brightness level, e.g. "BRI 7"
   STR_COUNT
 };
 

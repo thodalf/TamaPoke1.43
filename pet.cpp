@@ -281,7 +281,7 @@ void Pet::adoptFrom(const PartyMon &m, bool stayFrozen) {
   frozen = stayFrozen;
   strncpy(nick, m.nick, sizeof(nick) - 1);
   nick[sizeof(nick) - 1] = 0;
-  registerSpecies(speciesId);
+  registerSpecies(speciesId, shiny);
   save();
 }
 
@@ -522,10 +522,10 @@ void Pet::setRegion(uint8_t r) {
   save();
 }
 
-void Pet::registerSpecies(int16_t dex) {
+void Pet::registerSpecies(int16_t dex, bool wasShiny) {
   if (dex < 1 || dex > DEX_COUNT) return;
   dexReg[(dex - 1) >> 3] |= (1 << ((dex - 1) & 7));
-  if (shiny) dexShinyReg[(dex - 1) >> 3] |= (1 << ((dex - 1) & 7));
+  if (wasShiny) dexShinyReg[(dex - 1) >> 3] |= (1 << ((dex - 1) & 7));
 }
 
 // la racha y el vinculo mejoran el sorteo del huevo (0..~14)
@@ -968,7 +968,7 @@ void Pet::hatch() {
   medals = 0;
   newMedal = 0;
   nick[0] = 0;
-  registerSpecies(speciesId);  // criado = registrado en la pokedex
+  registerSpecies(speciesId, shiny);  // criado = registrado en la pokedex
   // Start empty: checkLearnGates() fills the level-1 moves. Seeding from TMs
   // instead would hand a newborn FIRE BLAST, which no level 1 creature knows.
   for (int i = 0; i < MOVE_SLOTS; i++) moves[i] = 0;
@@ -1018,7 +1018,7 @@ void Pet::evolve() {
     }
   }
   speciesId = next;
-  registerSpecies(speciesId);
+  registerSpecies(speciesId, shiny);
   checkLearnGates();   // the new form may gate a move at this very level
   sfxPlay(SFX_EVOLVE);
   evolveUntil = millis() + EVOLVE_ANIM_MS;
@@ -1456,5 +1456,5 @@ void Pet::load() {
   learnQCount = 0;      // rebuilt from lastLearnLevel by the next tick
   checkLearnGates();
   // siembra: la mascota actual cuenta como criada (guardados antiguos)
-  if (speciesId >= 1) registerSpecies(speciesId);
+  if (speciesId >= 1) registerSpecies(speciesId, shiny);
 }

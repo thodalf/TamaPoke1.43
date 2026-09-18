@@ -432,6 +432,13 @@ public:
   // autosave to notice. Defined out of line: save() is private and declared
   // further down.
   void saveNow();
+  // wasShiny is the SPECIES BEING REGISTERED's own shininess, not necessarily
+  // this->shiny -- a wild capture registers a different creature than the
+  // live pet, so the caller must say explicitly rather than this reaching for
+  // its own field, which would be the caught creature's registration wearing
+  // the ACTIVE pet's shiny bit. Public because a capture registers the catch,
+  // not the live pet, from outside the class (see battle's btlFinishCapture()).
+  void registerSpecies(int16_t dex, bool wasShiny);
 
 private:
   Preferences prefs;
@@ -490,7 +497,6 @@ private:
   void tick();
   void applyAutoSleep();
   void hatch();
-  void registerSpecies(int16_t dex);
   void save();
   void load();
   static uint8_t clamp100(int v) { return v < 0 ? 0 : (v > 100 ? 100 : v); }

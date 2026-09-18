@@ -145,6 +145,14 @@ enum StrId : uint8_t {
   S_MAKE_ACTIVE_HINT,  // why it is greyed: mid farewell/runaway/goodbye
   S_BRI_FMT,        // brightness level, e.g. "BRI 7"
   S_BTL_FLED_FMT,   // "%s fled!" -- a failed capture, worse than just breaking free
+  S_QUIZ,           // menu row: the "who's that Pokemon?" minigame
+  S_READ,           // menu row: the RSVP speed-reading tool
+  S_NO_BOOKS,       // shown when /books on the SD has nothing in it
+  S_CHOOSE_BOOK,    // book picker title, shown when more than one is on the card
+  S_WPM_FMT,        // reading speed, e.g. "300 WPM" -- WPM itself stays untranslated,
+                    // same convention as "Lv." on the team-select cells
+  S_THE_END,        // reached the end of the book
+  S_PAUSED,         // RSVP: tapped to pause mid-book
   STR_COUNT
 };
 

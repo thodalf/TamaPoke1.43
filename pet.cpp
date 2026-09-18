@@ -1087,6 +1087,21 @@ uint8_t Pet::playResult(uint8_t score) {
   return gain;
 }
 
+uint8_t Pet::quizResult(uint8_t score) {
+  if (ceremony != CER_NONE || isEgg()) return 0;
+  // Deliberately touches neither energy, fullness nor weight: those model
+  // physical exertion, and answering trivia is not exercise. Joy and bond
+  // scale with the streak, same shape as playResult()'s curve.
+  uint8_t before = joy;
+  joy = clamp100(joy + 4 + (score > 12 ? 26 : score * 2));
+  if (score >= 5) heartUntil = millis() + HEART_MS;
+  if (score > quizHi) quizHi = score;
+  addBond((uint8_t)(1 + score / 6));
+  registerCare();
+  save();
+  return (uint8_t)(joy - before);
+}
+
 // saco de entrenamiento: los golpes entrenan la fuerza. Devuelve la subida.
 uint8_t Pet::rewardTraining(uint8_t amount, uint8_t &which) {
   which = 0;
@@ -1351,6 +1366,7 @@ void Pet::save() {
   prefs.putUShort("shi", strHi);
   prefs.putUShort("qhi", spdHi);
   prefs.putUShort("vhi", vitHi);
+  prefs.putUShort("whi", quizHi);
   prefs.putString("nick", nick);
 }
 
@@ -1423,6 +1439,7 @@ void Pet::load() {
   strHi = prefs.getUShort("shi", 0);
   spdHi = prefs.getUShort("qhi", 0);
   vitHi = prefs.getUShort("vhi", 0);
+  quizHi = prefs.getUShort("whi", 0);
   prefs.getString("nick", nick, sizeof(nick));
   // Moves load last: relearnFromLevel() needs speciesId and ageMinutes, both of
   // which are read above. A save from before moves existed has no "mvs" key and

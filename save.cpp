@@ -30,10 +30,14 @@ const SaveField SAVE_FIELDS[] = {
   { "strk", SK_U16 },   { "bstrk", SK_U16 },  { "cday", SK_U32 },
   { "medal", SK_U16 },  { "tmedal", SK_U16 }, { "mstone", SK_U16 },
   { "ghi", SK_U16 },    { "shi", SK_U16 },    { "qhi", SK_U16 },   { "vhi", SK_U16 },
+  { "whi", SK_U16 },
   // the banked creatures
   { "party", SK_BYTES }, { "box", SK_BYTES },
   // settings, so a restored device plays the way it did
   { "lang", SK_U8 },    { "snd", SK_BOOL },   { "vol", SK_U8 },   { "bri", SK_U8 },
+  // RSVP reader: speed and where you left off, so a restore does not restart
+  // a book you were partway through
+  { "rwpm", SK_U16 },   { "rbook", SK_STR },  { "rpos", SK_U32 },
 };
 const uint16_t SAVE_FIELD_COUNT = sizeof(SAVE_FIELDS) / sizeof(SAVE_FIELDS[0]);
 

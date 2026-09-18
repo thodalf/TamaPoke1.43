@@ -145,6 +145,9 @@ public:
   }
   // The ball game: happiness AND defence training. Returns the DEF gained.
   uint8_t playResult(uint8_t score);
+  // "Who's That Pokemon?": a pure happiness minigame -- no stat rides on it,
+  // unlike every other minigame here. Returns the joy actually gained.
+  uint8_t quizResult(uint8_t score);
   uint8_t trainStrength(uint16_t hits);  // saco de entrenamiento (entrena FUE)
   // Its own trainer, so SPEED did not have to keep sharing the ball game --
   // which was freed up and now trains DEF instead, not left purely idle.
@@ -163,6 +166,7 @@ public:
   uint8_t rewardTraining(uint8_t amount, uint8_t &which);
   uint16_t spdHi = 0;    // best reaction-test score
   uint16_t vitHi = 0;    // best berry-catch score
+  uint16_t quizHi = 0;   // best "who's that Pokemon" streak
 
   // stats de combate: base real de gen 1 + nivel + IV + entrenamiento
   uint16_t atkStat() const;

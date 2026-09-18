@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include "dex.h"
+#include "i18n.h"  // gLang, for typeName()
 
 // Type effectiveness helpers. The chart itself (TYPE_FX) and the PkType enum
 // are generated into dex.h by tools/gen_dex.py from tools/dex_types.py.
@@ -30,15 +31,38 @@ static inline bool hasStab(int16_t dex, uint8_t moveType) {
   return DEX_TBL[dex].type1 == moveType || DEX_TBL[dex].type2 == moveType;
 }
 
-// Short display name for a type. English in every language, matching how the
-// species names in DEX_TBL are already English regardless of the UI language.
+// Short display name for a type, in the active language. Standard,
+// well-established localizations from the mainline games (unaccented per the
+// bitmap font's ASCII-only rule) -- these 18 names are fixed and few enough
+// to hand-write directly, unlike DEX_NAMES/MOVE_NAMES which needed PokeAPI.
 static inline const char *typeName(uint8_t t) {
-  static const char *const N[TYPE_COUNT] = {
-    "NORMAL", "FIRE", "WATER", "ELECTRIC", "GRASS", "ICE", "FIGHTING",
-    "POISON", "GROUND", "FLYING", "PSYCHIC", "BUG", "ROCK", "GHOST",
-    "DRAGON", "DARK", "STEEL", "FAIRY",
+  static const char *const N[LANG_COUNT][TYPE_COUNT] = {
+    // ES
+    { "NORMAL", "FUEGO", "AGUA", "ELECTRICO", "PLANTA", "HIELO", "LUCHA",
+      "VENENO", "TIERRA", "VOLADOR", "PSIQUICO", "BICHO", "ROCA", "FANTASMA",
+      "DRAGON", "SINIESTRO", "ACERO", "HADA" },
+    // EN
+    { "NORMAL", "FIRE", "WATER", "ELECTRIC", "GRASS", "ICE", "FIGHTING",
+      "POISON", "GROUND", "FLYING", "PSYCHIC", "BUG", "ROCK", "GHOST",
+      "DRAGON", "DARK", "STEEL", "FAIRY" },
+    // FR
+    { "NORMAL", "FEU", "EAU", "ELECTRIK", "PLANTE", "GLACE", "COMBAT",
+      "POISON", "SOL", "VOL", "PSY", "INSECTE", "ROCHE", "SPECTRE",
+      "DRAGON", "TENEBRES", "ACIER", "FEE" },
+    // DE
+    { "NORMAL", "FEUER", "WASSER", "ELEKTRO", "PFLANZE", "EIS", "KAMPF",
+      "GIFT", "BODEN", "FLUG", "PSYCHO", "KAFER", "GESTEIN", "GEIST",
+      "DRACHE", "UNLICHT", "STAHL", "FEE" },
+    // IT
+    { "NORMALE", "FUOCO", "ACQUA", "ELETTRO", "ERBA", "GHIACCIO", "LOTTA",
+      "VELENO", "TERRA", "VOLANTE", "PSICO", "COLEOTTERO", "ROCCIA", "SPETTRO",
+      "DRAGO", "BUIO", "ACCIAIO", "FOLLETTO" },
+    // PT
+    { "NORMAL", "FOGO", "AGUA", "ELETRICO", "PLANTA", "GELO", "LUTADOR",
+      "VENENO", "TERRA", "VOADOR", "PSIQUICO", "INSETO", "PEDRA", "FANTASMA",
+      "DRAGAO", "SOMBRIO", "ACO", "FADA" },
   };
-  return (t < TYPE_COUNT) ? N[t] : "?";
+  return (t < TYPE_COUNT) ? N[gLang][t] : "?";
 }
 
 // One colour per type, for the chips on move rows and the battle grid. The move

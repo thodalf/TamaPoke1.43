@@ -88,3 +88,36 @@ extern bool sdDirty;  // true tras recibir archivos: recargar sprite
 // until the board was rebooted, which looked exactly like the download failing.
 // The main loop rescans when this is set; the transfer itself is never delayed.
 extern bool sdArtDirty;
+
+// Reads a book for the RSVP minigame (TamaPoke.ino's renderRsvp()) one word
+// at a time rather than loading it whole -- a book can be far bigger than
+// PSRAM has room to spare alongside two streamed battle sprites and the
+// framebuffer. Deliberately holds NO open File handle between calls: only
+// `name`/bytePos, re-opening for each nextWord(). That costs one extra SD
+// open per word, negligible next to the word interval itself (75ms+ even at
+// the fastest setting) -- and it means this header needs no SD library type
+// at all, so it stays includable from the emulator build the same way
+// PmdMon/SdThumbs already are (see sdmon.cpp for why: their File handles are
+// local to their own functions too, never struct members).
+struct BookReader {
+  bool loaded = false;
+  uint32_t fileSize = 0;
+  uint32_t bytePos = 0;
+  char name[24] = "";
+  bool open(const char *bookName);   // name only, no path -- lives under /books
+  void close();
+  // Resumes at a byte offset saved from a previous session (see "rbook"/"rpos"
+  // in save.cpp). Clamped to fileSize so a book replaced by a shorter one does
+  // not seek past its end.
+  void seek(uint32_t at);
+  // Next whitespace-delimited token, ASCII PRINTABLE ONLY -- anything else is
+  // dropped rather than handed to the bitmap font, which has no glyphs for it,
+  // same rule as every other firmware string. Empty and false at end of file.
+  bool nextWord(char *out, size_t outCap);
+};
+extern BookReader gBook;
+
+// Lists the .txt files under /books (created at mount if missing, alongside
+// /mons). Names come back WITHOUT the .txt suffix, truncated to 23 chars.
+// Returns how many were found, up to max.
+uint8_t sdListBooks(char names[][24], uint8_t max);

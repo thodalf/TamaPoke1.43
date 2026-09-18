@@ -52,6 +52,9 @@ cd web && python3 -m http.server 8000
 3. Restart (PWR button) → choose your starter and play.
 
 A hidden "pick them manually" option lets advanced users send their own `.bin`.
+A "load .txt file(s)" link in the same step sends plain-text books to `/books`
+on the SD for the RSVP speed-reading minigame (same PUT protocol, same USB
+connection) -- ASCII only, the bitmap font has no accented glyphs.
 
 ## Hosting the sprites
 

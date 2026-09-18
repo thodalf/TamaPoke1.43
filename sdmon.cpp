@@ -3,6 +3,7 @@
 #include "pin_config.h"
 #include "pet.h"   // gRegionArt, REGIONS -- the mask this narrows
 #include <FS.h>
+#include <string.h>
 
 #if defined(TAMAPOKE_SD_NATIVE_SDMMC)
 // 1.75: pines propios, protocolo SD nativo (SD_MMC), verificado en placa.
@@ -200,6 +201,7 @@ bool sdBegin() {
   if (sdReady) {
     Serial.printf("SD montada: %llu MB\n", SDCARD.cardSize() / (1024ULL * 1024ULL));
     SDCARD.mkdir("/mons");
+    SDCARD.mkdir("/books");
     sdScanRegionArt();
   } else {
     Serial.println("SD no detectada (el juego usa los sprites de flash)");
@@ -324,8 +326,8 @@ bool sdSerialCommand(const String &line) {
     if (remaining == 0) sdArtDirty = true;
     Serial.println(remaining == 0 ? "DONE" : "ERR");
     return true;
-  } else if (line == "LS") {
-    File dir = SDCARD.open("/mons");
+  } else if (line == "LS" || line == "LS BOOKS") {
+    File dir = SDCARD.open(line == "LS BOOKS" ? "/books" : "/mons");
     if (dir) {
       File e;
       while ((e = dir.openNextFile())) {
@@ -338,4 +340,111 @@ bool sdSerialCommand(const String &line) {
     return true;
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// RSVP book reading (see renderRsvp() in the sketch): streamed word by word
+// off the SD rather than loaded whole, so a book's size is bounded only by
+// the card.
+// ---------------------------------------------------------------------------
+
+BookReader gBook;
+
+bool BookReader::open(const char *bookName) {
+  close();
+  if (!sdReady) return false;
+  char path[40];
+  snprintf(path, sizeof(path), "/books/%s.txt", bookName);
+  File f = SDCARD.open(path, FILE_READ);
+  if (!f) return false;
+  fileSize = f.size();
+  f.close();
+  strncpy(name, bookName, sizeof(name) - 1);
+  name[sizeof(name) - 1] = 0;
+  bytePos = 0;
+  loaded = true;
+  return true;
+}
+
+void BookReader::close() {
+  loaded = false;
+  fileSize = bytePos = 0;
+  name[0] = 0;
+}
+
+void BookReader::seek(uint32_t at) {
+  if (!loaded) return;
+  bytePos = (at > fileSize) ? fileSize : at;
+}
+
+static inline bool isRsvpSpace(int c) {
+  return c == ' ' || c == '\n' || c == '\r' || c == '\t';
+}
+
+bool BookReader::nextWord(char *out, size_t outCap) {
+  out[0] = 0;
+  if (!loaded) return false;
+  char path[40];
+  snprintf(path, sizeof(path), "/books/%s.txt", name);
+  File f = SDCARD.open(path, FILE_READ);
+  if (!f) { loaded = false; return false; }
+  f.seek(bytePos);
+  bool ok = false;
+  for (;;) {
+    int c;
+    do {
+      c = f.available() ? f.read() : -1;
+      if (c < 0) break;
+      bytePos++;
+    } while (isRsvpSpace(c));
+    if (c < 0) break;              // EOF while skipping whitespace
+    size_t n = 0;
+    while (c >= 0 && !isRsvpSpace(c)) {
+      if (c >= 0x20 && c < 0x7F && n + 1 < outCap) out[n++] = (char)c;
+      c = f.available() ? f.read() : -1;
+      if (c >= 0) bytePos++;
+    }
+    out[n] = 0;
+    if (n > 0) { ok = true; break; }
+    if (c < 0) break;              // EOF right at the end of a dropped-only token
+    // token was entirely non-ASCII (dropped) -- loop for the next real word
+  }
+  f.close();
+  return ok;
+}
+
+static bool endsWithTxt(const char *s, size_t len) {
+  if (len <= 4) return false;
+  char a = s[len - 4], b = s[len - 3], c = s[len - 2], d = s[len - 1];
+  if (a >= 'A' && a <= 'Z') a += 32;
+  if (b >= 'A' && b <= 'Z') b += 32;
+  if (c >= 'A' && c <= 'Z') c += 32;
+  if (d >= 'A' && d <= 'Z') d += 32;
+  return a == '.' && b == 't' && c == 'x' && d == 't';
+}
+
+uint8_t sdListBooks(char names[][24], uint8_t max) {
+  uint8_t n = 0;
+  if (!sdReady) return 0;
+  File dir = SDCARD.open("/books");
+  if (!dir) return 0;
+  File e;
+  while (n < max && (e = dir.openNextFile())) {
+    if (!e.isDirectory()) {
+      const char *nm = e.name();
+      const char *base = strrchr(nm, '/');
+      base = base ? base + 1 : nm;
+      size_t len = strlen(base);
+      if (endsWithTxt(base, len)) {
+        size_t copyLen = len - 4;
+        if (copyLen > 23) copyLen = 23;
+        memcpy(names[n], base, copyLen);
+        names[n][copyLen] = 0;
+        n++;
+      }
+    }
+    e.close();
+  }
+  dir.close();
+  return n;
 }

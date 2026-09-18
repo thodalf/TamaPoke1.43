@@ -46,6 +46,7 @@
 #include "party.h"
 #include "save.h"
 #include "pet.h"
+#include "noart.h"     // speciesHasArt(): the quiz picks only species that can be drawn
 #include "sdmon.h"
 #include "rtcbat.h"
 #include "i18n.h"
@@ -53,7 +54,7 @@
 
 // Version del firmware. Subir este numero en cada release (y manifest.json para
 // el instalador web). Se muestra en la pantalla de ajustes y por serie al arrancar.
-#define FW_VERSION "3.17"
+#define FW_VERSION "3.19"
 
 #if defined(TAMAPOKE_DISPLAY_QSPI_AMOLED)
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -524,6 +525,32 @@ uint16_t berryHits = 0, berryMisses = 0;
 uint8_t berryGain = 0;
 bool berryNewHi = false;
 
+// "who's that Pokemon?" quiz -- a pure happiness minigame, no stat rides on
+// it. See Pet::quizResult() and the render/tap/spawn functions further down.
+bool quizOpen = false;
+uint32_t quizUntil = 0, quizOverUntil = 0;
+int16_t quizDex = 0;
+int16_t quizOpt[4];
+uint8_t quizAnswer = 0;   // which of quizOpt[] is the one shown
+uint16_t quizScore = 0, quizMisses = 0;
+uint8_t quizGain = 0;
+bool quizNewHi = false;
+
+// RSVP speed-reading tool -- a pure utility, no stat or joy rides on it,
+// unlike every minigame above. Books are .txt files the web installer puts
+// under /books; see BookReader in sdmon.h/.cpp for the streamed reader and
+// startRsvp()/renderRsvp()/rsvpTap() further down for the screen.
+bool rsvpOpen = false;
+bool rsvpPicking = false;    // showing the book list rather than reading one
+char rsvpBooks[12][24];
+uint8_t rsvpBookN = 0;
+uint8_t rsvpPickPage = 0;
+char rsvpTitle[24] = "";     // current book's name, for the header
+char rsvpWord[24] = "";      // the word on screen right now
+uint32_t rsvpNextAt = 0;
+bool rsvpPaused = false;
+bool rsvpDone = false;       // reached the end of the book
+
 bool gymOpen = false;
 bool gymHard = false;   // which ladder the list is showing
 
@@ -692,7 +719,7 @@ uint8_t gymPage = 0;
 #define GYM_ROW_Y(i) (110 + (i) * 50)
 int8_t btlTrainer = -1;      // index into TRAINERS, -1 = a one-off fight
 bool btlHard = false;
-Combatant btlSquad[TRAINER_TEAM_MAX + 1];
+Combatant btlSquad[TRAINER_TEAM_MAX];
 uint8_t btlSquadN = 0, btlSquadAt = 0;
 // El grid de cambio tiene 4 celdas (comparte BTL_CELL_X/Y/W/H con el de
 // movimientos -- ver el comentario de btlCellHit() sobre por que NO debe
@@ -793,16 +820,15 @@ static inline bool btlCellHit(int i, int16_t x, int16_t y) {
          y >= BTL_HIT_Y0(i) && y <= BTL_HIT_Y1(i);
 }
 
-// True si el equipo no cabe en las 4 celdas del grid de cambio -- la celda 3
-// se convierte en boton de pagina (">"/"<") en vez de un puesto real. Con 4 o
-// menos, las 4 celdas son puestos y no hay paginas: comportamiento identico
-// al de antes de que esto existiera.
+// True when the team does not fit the switch grid's 4 cells -- cell 3 becomes
+// a page button (">") instead of a real slot. With 4 or fewer, all 4 cells
+// are slots and there is no paging: identical to before this existed.
 static inline bool btlSwitchPaged() { return btlSquadN > 4; }
-// Indice real en btlSquad[] para la celda `cell` (0..2, la 3 es navegacion
-// cuando btlSwitchPaged()) en la pagina actual, o -1 si esa celda esta vacia
-// (ultima pagina con un equipo de 5). UNA sola funcion para render y tap, por
-// la misma razon que btlCellHit() es una sola: que ninguno de los dos lados
-// pueda tener su propia cuenta y desincronizarse.
+// Real index into btlSquad[] for cell `cell` (0..2, cell 3 is navigation when
+// btlSwitchPaged()) on the current page, or -1 if that cell is empty (the
+// last page with a squad not a multiple of 3). ONE function for render and
+// tap, for the same reason btlCellHit() is one: neither side can keep its own
+// count and drift out of sync with the other.
 static int8_t btlSwitchSlot(uint8_t cell) {
   uint8_t i = btlSwitchPaged() ? (uint8_t)(btlSwitchPage * 3 + cell) : cell;
   return (i < btlSquadN) ? (int8_t)i : (int8_t)-1;
@@ -940,6 +966,57 @@ void setDispBrightness(uint8_t v) {
   p.begin("tamapoke", false);
   p.putUChar("bri", gBri);
   p.end();
+}
+
+// RSVP reading speed, same cached-Preferences pattern as brightness/volume.
+#define RSVP_WPM_MIN 100
+#define RSVP_WPM_MAX 800
+#define RSVP_WPM_STEP 50
+static uint16_t gRsvpWpm = 300;
+static bool gRsvpWpmLoaded = false;
+uint16_t rsvpWpm() {
+  if (!gRsvpWpmLoaded) {
+    Preferences p;
+    p.begin("tamapoke", true);
+    gRsvpWpm = p.getUShort("rwpm", 300);
+    if (gRsvpWpm < RSVP_WPM_MIN || gRsvpWpm > RSVP_WPM_MAX) gRsvpWpm = 300;
+    p.end();
+    gRsvpWpmLoaded = true;
+  }
+  return gRsvpWpm;
+}
+void setRsvpWpm(uint16_t v) {
+  if (v < RSVP_WPM_MIN) v = RSVP_WPM_MIN;
+  if (v > RSVP_WPM_MAX) v = RSVP_WPM_MAX;
+  gRsvpWpm = v;
+  gRsvpWpmLoaded = true;
+  Preferences p;
+  p.begin("tamapoke", false);
+  p.putUShort("rwpm", gRsvpWpm);
+  p.end();
+}
+
+// Where you left off, so closing the tool and coming back (even across a
+// reboot) picks up mid-book rather than restarting it -- same "keep what you
+// earned" spirit as every minigame's early-exit. Only one book's position is
+// remembered, same as there being one live pet: the LAST one you were in.
+void rsvpSaveProgress(const char *name, uint32_t pos) {
+  Preferences p;
+  p.begin("tamapoke", false);
+  p.putString("rbook", name);
+  p.putUInt("rpos", pos);
+  p.end();
+}
+// Returns the saved offset for `name`, or 0 if the save is for a different
+// book (a fresh book always starts at the top) or there is none yet.
+uint32_t rsvpLoadProgress(const char *name) {
+  Preferences p;
+  p.begin("tamapoke", true);
+  char saved[24] = "";
+  p.getString("rbook", saved, sizeof(saved));
+  uint32_t pos = (!strcmp(saved, name)) ? p.getUInt("rpos", 0) : 0;
+  p.end();
+  return pos;
 }
 
 void setup() {
@@ -1239,7 +1316,7 @@ void loop() {
   // 85 ms en juego/saco: margen seguro para que el redibujado no pise el envio
   // DMA del frame anterior (a 40-65 ms solapaba y causaba flashes negros; con
   // sprites grandes el dibujo tarda mas, asi que se deja colchon)
-  if (now - lastRender >= (uint32_t)((gameOpen || sackOpen || spdOpen || berryOpen) ? 85 : 100)) {
+  if (now - lastRender >= (uint32_t)((gameOpen || sackOpen || spdOpen || berryOpen || quizOpen || rsvpOpen) ? 85 : 100)) {
     lastRender = now;
     render();
   }
@@ -1650,6 +1727,8 @@ void onSwipeV(int dir) {
   if (sackOpen) { leaveSack(); return; }
   if (spdOpen) { leaveSpeed(); return; }
   if (berryOpen) { leaveBerry(); return; }
+  if (quizOpen) { leaveQuiz(); return; }
+  if (rsvpOpen) { leaveRsvp(); return; }
   if (galleryOpen) {
     if (galleryDetail) { galleryDetail = 0; galleryPmd.unload(); galleryDirty = true; return; }
     galleryRegion = (uint8_t)((galleryRegion + (dir > 0 ? 1 : GAL_REGIONS - 1)) % GAL_REGIONS);
@@ -2055,6 +2134,8 @@ void onSwipe(int dir) {
   if (gameOpen) { leaveGame(); return; }   // swipe out, keeping what you earned
   if (spdOpen) { leaveSpeed(); return; }
   if (berryOpen) { leaveBerry(); return; }
+  if (quizOpen) { leaveQuiz(); return; }
+  if (rsvpOpen) { leaveRsvp(); return; }
   if (kbOpen || clockOpen) return;
   if (cardOpen) {  // dentro de la ficha: cambiar entre las 4 paginas
     int p = (int)cardPage + (dir > 0 ? -1 : 1);  // izquierda avanza
@@ -2256,6 +2337,15 @@ void onTap(int16_t x, int16_t y) {
         sfxPlay(SFX_TAP);
         menuOpen = false;
         choiceKind = 3; choiceUntil = millis() + 12000;
+      } else if (menuPage == 1 && i == 1) {   // QUIZ
+        if (pet.isEgg() || pet.sleeping || pet.ceremony != CER_NONE) { sfxPlay(SFX_DENY); return; }
+        sfxPlay(SFX_TAP);
+        menuOpen = false;
+        startQuiz();
+      } else if (menuPage == 1 && i == 2) {   // READ
+        sfxPlay(SFX_TAP);
+        menuOpen = false;
+        startRsvp();
       }
       // any other slot on page 1 is empty: no-op, the menu stays open
       return;
@@ -2340,6 +2430,14 @@ void onTap(int16_t x, int16_t y) {
   }
   if (berryOpen) {
     berryTap(x, y);
+    return;
+  }
+  if (quizOpen) {
+    quizTap(x, y);
+    return;
+  }
+  if (rsvpOpen) {
+    rsvpTap(x, y);
     return;
   }
   if (gameOpen) {
@@ -2657,7 +2755,7 @@ uint8_t uiCurrentScreen() {
   if (lanOpen) return SCR_LAN;
   if (gymOpen) return gymPick ? SCR_GYMPICK : SCR_GYM;
   if (pet.hasLearnOffer()) return SCR_LEARN;
-  if (gameOpen || sackOpen || spdOpen || berryOpen) return SCR_GAME;
+  if (gameOpen || sackOpen || spdOpen || berryOpen || quizOpen || rsvpOpen) return SCR_GAME;
   if (trainOpen) return SCR_TRAIN;
   if (menuOpen) return SCR_MENU;
   return SCR_MAIN;
@@ -2740,6 +2838,14 @@ void render() {
   }
   if (berryOpen) {
     renderBerry();
+    return;
+  }
+  if (quizOpen) {
+    renderQuiz();
+    return;
+  }
+  if (rsvpOpen) {
+    renderRsvp();
     return;
   }
   if (trainOpen) {
@@ -3668,7 +3774,7 @@ void drawMoveRow(int y, uint8_t mv, bool highlight, int16_t dex) {
   gfx->setTextColor(UI_INK);
   gfx->setTextSize(2);
   gfx->setCursor(82, y + 8);
-  gfx->print(m.name);
+  gfx->print(moveName(mv));
   // There is no per-type palette (DexEntry.accent is per species), and inventing
   // one by hand would duplicate what gen_dex.py generates. Colouring same-type
   // moves in the species accent is more useful anyway: STAB is a 1.5x damage
@@ -4855,7 +4961,7 @@ void battleTap(int16_t x, int16_t y) {
       if (!btlCellHit(cell, x, y)) continue;
       if (paged && cell == 3) { btlSwitchPage ^= 1; sfxPlay(SFX_TAP); return; }
       int8_t si = btlSwitchSlot(cell);
-      if (si < 0) return;  // hueco vacio en la ultima pagina, no hace nada
+      if (si < 0) return;  // empty cell on the last page, does nothing
       uint8_t i = (uint8_t)si;
       const Combatant &m = (i == btlSquadAt) ? btlYou : btlSquad[i];
       if (i == btlSquadAt || m.fainted()) { sfxPlay(SFX_DENY); return; }
@@ -5285,6 +5391,385 @@ void renderBerry() {
   gfx->setTextSize(2);
   gfx->setCursor(CX - strlen(b) * 6, 76);
   gfx->print(b);
+  gfx->flush();
+}
+
+// ---------- "who's that Pokemon?" quiz ----------
+// A pure happiness minigame -- see Pet::quizResult(). The silhouette trick
+// already existed for an unregistered gallery entry (renderGallery()'s `!reg`
+// flag on drawThumb()); this just always asks for it, on a species you are
+// quizzed to NAME rather than one you have not met yet.
+#define QUIZ_MS 25000UL
+#define QUIZ_OPTS 4
+#define QUIZ_OPT_X(i) (BTL_GRID_X + ((i) % 2) * (BTL_CELL_W + 8))
+#define QUIZ_OPT_Y(i) (BTL_GRID_Y + ((i) / 2) * (BTL_CELL_H + 8))
+
+// A random species with real art. Prefers one already registered, so the
+// question is always something the player could plausibly know -- but falls
+// back to anything drawable once there are too few registered to fill 4
+// distinct options, which is every early game.
+static int16_t quizRandomDex(bool preferKnown) {
+  for (int tries = 0; tries < 60; tries++) {
+    int16_t d = (int16_t)(1 + random(DEX_COUNT));
+    if (!speciesHasArt(d)) continue;
+    if (preferKnown && !pet.isRegistered(d)) continue;
+    return d;
+  }
+  int16_t d = 1;
+  while (d < DEX_COUNT && !speciesHasArt(d)) d++;
+  return d;
+}
+
+void quizSpawn() {
+  bool known = pet.registeredCount() >= QUIZ_OPTS;
+  quizDex = quizRandomDex(known);
+  quizAnswer = (uint8_t)random(QUIZ_OPTS);
+  quizOpt[quizAnswer] = quizDex;
+  for (uint8_t i = 0; i < QUIZ_OPTS; i++) {
+    if (i == quizAnswer) continue;
+    int16_t d;
+    bool dup;
+    int guard = 0;
+    do {
+      d = quizRandomDex(known);
+      dup = (d == quizDex);
+      for (uint8_t j = 0; j < i && !dup; j++) dup = (quizOpt[j] == d);
+    } while (dup && ++guard < 30);
+    quizOpt[i] = d;
+  }
+}
+
+void startQuiz() {
+  if (pet.isEgg() || pet.sleeping || pet.ceremony) return;
+  quizOpen = true;
+  quizUntil = millis() + QUIZ_MS;
+  quizOverUntil = 0;
+  quizScore = 0;
+  quizMisses = 0;
+  quizGain = 0;
+  quizNewHi = false;
+  quizSpawn();
+}
+
+// Leaving early banks what was actually earned, same as every other minigame
+// here -- quitting used to forfeit everything, which read as a punishment for
+// walking away rather than as an honest partial result.
+void leaveQuiz() {
+  if (!quizOverUntil) quizGain = pet.quizResult((uint8_t)quizScore);
+  quizOpen = false;
+}
+
+void quizTap(int16_t x, int16_t y) {
+  if (quizOverUntil) return;
+  if (y < 72) { leaveQuiz(); return; }   // header tap = leave, same as the others
+  for (uint8_t i = 0; i < QUIZ_OPTS; i++) {
+    int cx0 = QUIZ_OPT_X(i), cy0 = QUIZ_OPT_Y(i);
+    if (x < cx0 || x > cx0 + BTL_CELL_W || y < cy0 || y > cy0 + BTL_CELL_H) continue;
+    if (i == quizAnswer) { quizScore++; sfxPlay(SFX_TAP); }
+    else { quizMisses++; sfxPlay(SFX_DENY); }
+    quizSpawn();
+    return;
+  }
+}
+
+void renderQuiz() {
+  uint32_t now = millis();
+  drawGameScene();
+  bool night = sceneHour() < 6 || sceneHour() >= 20;
+  uint16_t ink = night ? UI_INK_NIGHT : UI_INK;
+
+  if (quizOverUntil) {
+    if (now > quizOverUntil) { quizOpen = false; return; }
+    char b[24];
+    snprintf(b, sizeof(b), T(S_SCORE_FMT), quizScore);
+    gfx->setTextColor(ink);
+    gfx->setTextSize(4);
+    gfx->setCursor(CX - strlen(b) * 12, 150);
+    gfx->print(b);
+    gfx->setTextSize(2);
+    if (quizNewHi && quizScore > 0) {
+      gfx->setTextColor(UI_BAR_WARN);
+      gfx->setCursor(CX - strlen(T(S_NEW_RECORD)) * 6, 214);
+      gfx->print(T(S_NEW_RECORD));
+    } else {
+      char rec[20];
+      snprintf(rec, sizeof(rec), T(S_RECORD_FMT), pet.quizHi);
+      gfx->setTextColor(ink);
+      gfx->setCursor(CX - strlen(rec) * 6, 214);
+      gfx->print(rec);
+    }
+    const char *msg = quizScore >= 8 ? T(S_GREAT_JOY) : T(S_PLUS_JOY);
+    gfx->setTextColor(ink);
+    gfx->setCursor(CX - strlen(msg) * 6, 250);
+    gfx->print(msg);
+    gfx->flush();
+    return;
+  }
+
+  if (now >= quizUntil) {
+    quizNewHi = (quizScore > pet.quizHi);
+    quizGain = pet.quizResult((uint8_t)quizScore);
+    sfxPlay(quizNewHi && quizScore > 0 ? SFX_MEDAL : SFX_PLAY);
+    quizOverUntil = now + 3500;
+    gfx->flush();
+    return;
+  }
+
+  char b[8];
+  snprintf(b, sizeof(b), "%u", quizScore);
+  gfx->setTextColor(ink);
+  gfx->setTextSize(4);
+  gfx->setCursor(CX - strlen(b) * 12, 30);
+  gfx->print(b);
+  uint32_t left = (quizUntil > now) ? (quizUntil - now + 999) / 1000 : 0;
+  snprintf(b, sizeof(b), "%us", (unsigned)left);
+  gfx->setTextSize(2);
+  gfx->setCursor(CX - strlen(b) * 6, 76);
+  gfx->print(b);
+
+  const uint8_t *th = thumbs.get(quizDex);
+  if (th) {
+    // drawThumb() centres within an 80px box (GAL_CELL, defined later in the
+    // file than this function) -- 80 is written out here rather than forward-
+    // referencing that macro.
+    drawThumb(th, CX - 80, 116, 4, true);   // always a silhouette: that IS the question
+  } else {
+    gfx->setTextColor(ink);
+    gfx->setTextSize(6);
+    gfx->setCursor(CX - 18, 140);
+    gfx->print("?");
+  }
+
+  for (uint8_t i = 0; i < QUIZ_OPTS; i++) {
+    int x = QUIZ_OPT_X(i), y = QUIZ_OPT_Y(i);
+    gfx->fillRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, UI_BG_DAY);
+    gfx->drawRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, UI_INK);
+    gfx->setTextColor(UI_INK);
+    gfx->setTextSize(1);
+    const char *nm = dexName(quizOpt[i]);
+    gfx->setCursor(x + (BTL_CELL_W - (int)strlen(nm) * 6) / 2, y + BTL_CELL_H / 2 - 4);
+    gfx->print(nm);
+  }
+  gfx->flush();
+}
+
+// ---------- RSVP speed-reading tool ----------
+// Streams a .txt book off the SD one word at a time via BookReader (see
+// sdmon.h/.cpp) and flashes each word centred on screen at a chosen
+// words-per-minute rate -- the whole premise of RSVP is that a fixed fixation
+// point removes the need for saccades, so reading holds up well above the
+// speed a moving eye normally manages. A pure utility: unlike every minigame
+// above, nothing here touches a pet stat or joy.
+#define RSVP_PICK_ROWS 5
+#define RSVP_PICK_ROW_H 52
+#define RSVP_PICK_Y(i) (100 + (i) * RSVP_PICK_ROW_H)
+#define RSVP_SPD_Y 344
+#define RSVP_SPD_MINUS_X (CX - 90)
+#define RSVP_SPD_PLUS_X (CX + 42)
+#define RSVP_SPD_BTN_W 48
+#define RSVP_SPD_BTN_H 30
+
+static void rsvpScheduleNext() {
+  rsvpNextAt = millis() + 60000UL / rsvpWpm();
+}
+
+// Opens `name` (no path or .txt suffix -- BookReader adds both) and resumes
+// where a PREVIOUS session on this same book left off, if any.
+static void rsvpOpenBook(const char *name) {
+  strncpy(rsvpTitle, name, sizeof(rsvpTitle) - 1);
+  rsvpTitle[sizeof(rsvpTitle) - 1] = 0;
+  rsvpPicking = false;
+  rsvpPaused = false;
+  rsvpDone = false;
+  rsvpWord[0] = 0;
+  if (!gBook.open(name)) { rsvpDone = true; return; }
+  uint32_t resume = rsvpLoadProgress(name);
+  if (resume) gBook.seek(resume);
+  if (!gBook.nextWord(rsvpWord, sizeof(rsvpWord))) { rsvpDone = true; return; }
+  rsvpScheduleNext();
+}
+
+// Lists /books and either opens the one book there, opens the picker if there
+// is more than one, or leaves renderRsvp() to show S_NO_BOOKS.
+void startRsvp() {
+  rsvpOpen = true;
+  rsvpPicking = false;
+  rsvpPaused = false;
+  rsvpDone = false;
+  rsvpPickPage = 0;
+  rsvpWord[0] = 0;
+  rsvpBookN = sdListBooks(rsvpBooks, 12);
+  if (rsvpBookN == 0) return;
+  if (rsvpBookN == 1) { rsvpOpenBook(rsvpBooks[0]); return; }
+  rsvpPicking = true;
+}
+
+// Banks the reading position exactly the way every minigame banks a partial
+// score on an early exit -- closing mid-book is the normal case, not a loss.
+void leaveRsvp() {
+  if (gBook.loaded) rsvpSaveProgress(rsvpTitle, gBook.bytePos);
+  gBook.close();
+  rsvpOpen = false;
+}
+
+void rsvpTap(int16_t x, int16_t y) {
+  if (y < 72) { leaveRsvp(); return; }   // header tap = leave, same as every minigame
+  if (rsvpBookN == 0) return;
+  if (rsvpPicking) {
+    uint8_t seen = 0, drawn = 0;
+    for (uint8_t i = 0; i < rsvpBookN; i++) {
+      if (seen++ < rsvpPickPage * RSVP_PICK_ROWS) continue;
+      if (drawn >= RSVP_PICK_ROWS) break;
+      int ry = RSVP_PICK_Y(drawn);
+      if (y >= ry && y <= ry + RSVP_PICK_ROW_H - 8) { sfxPlay(SFX_TAP); rsvpOpenBook(rsvpBooks[i]); return; }
+      drawn++;
+    }
+    // tapping below the rows, near the page dots, pages forward
+    uint8_t pages = (rsvpBookN + RSVP_PICK_ROWS - 1) / RSVP_PICK_ROWS;
+    if (pages > 1 && y >= 400) {
+      rsvpPickPage = (uint8_t)((rsvpPickPage + 1) % pages);
+      sfxPlay(SFX_TAP);
+    }
+    return;
+  }
+  if (rsvpDone) {
+    // tapping a finished book restarts it from the top -- otherwise, once
+    // read, it would stay stuck on THE END forever, since resuming always
+    // seeks to the saved position and a finished book's saved position IS
+    // its own end.
+    sfxPlay(SFX_TAP);
+    gBook.seek(0);
+    rsvpDone = false;
+    if (gBook.nextWord(rsvpWord, sizeof(rsvpWord))) rsvpScheduleNext();
+    else rsvpDone = true;   // an empty book: nothing to restart into
+    return;
+  }
+  if (y >= RSVP_SPD_Y && y <= RSVP_SPD_Y + RSVP_SPD_BTN_H) {
+    if (x >= RSVP_SPD_MINUS_X && x < RSVP_SPD_MINUS_X + RSVP_SPD_BTN_W) {
+      setRsvpWpm(rsvpWpm() - RSVP_WPM_STEP);
+      sfxPlay(SFX_TAP);
+      if (!rsvpPaused) rsvpScheduleNext();   // the new speed applies from the word already showing
+      return;
+    }
+    if (x >= RSVP_SPD_PLUS_X && x < RSVP_SPD_PLUS_X + RSVP_SPD_BTN_W) {
+      setRsvpWpm(rsvpWpm() + RSVP_WPM_STEP);
+      sfxPlay(SFX_TAP);
+      if (!rsvpPaused) rsvpScheduleNext();
+      return;
+    }
+    return;
+  }
+  // anywhere else while reading: pause/resume, same as tapping a paused
+  // battle animation area does nothing special -- this screen has no other use
+  // for the middle of the panel
+  sfxPlay(SFX_TAP);
+  rsvpPaused = !rsvpPaused;
+  if (!rsvpPaused) rsvpScheduleNext();
+}
+
+void renderRsvp() {
+  gfx->fillScreen(RGB565_BLACK);
+  gfx->fillCircle(CX, CY, 231, UI_BG_DAY);
+  gfx->setTextColor(UI_INK);
+  gfx->setTextSize(2);
+  const char *head = rsvpPicking ? T(S_CHOOSE_BOOK) : (rsvpTitle[0] ? rsvpTitle : T(S_READ));
+  gfx->setCursor(CX - (int)strlen(head) * 6, 44);
+  gfx->print(head);
+
+  if (rsvpBookN == 0) {
+    gfx->setTextSize(2);
+    gfx->setCursor(CX - (int)strlen(T(S_NO_BOOKS)) * 6, 210);
+    gfx->print(T(S_NO_BOOKS));
+    gfx->flush();
+    return;
+  }
+
+  if (rsvpPicking) {
+    uint8_t seen = 0, drawn = 0;
+    for (uint8_t i = 0; i < rsvpBookN; i++) {
+      if (seen++ < rsvpPickPage * RSVP_PICK_ROWS) continue;
+      if (drawn >= RSVP_PICK_ROWS) break;
+      int ry = RSVP_PICK_Y(drawn);
+      gfx->fillRoundRect(70, ry, 326, RSVP_PICK_ROW_H - 8, 10, UI_WHITE);
+      gfx->drawRoundRect(70, ry, 326, RSVP_PICK_ROW_H - 8, 10, UI_INK);
+      gfx->setTextColor(UI_INK);
+      gfx->setTextSize(2);
+      gfx->setCursor(90, ry + 12);
+      gfx->print(rsvpBooks[i]);
+      drawn++;
+    }
+    uint8_t pages = (rsvpBookN + RSVP_PICK_ROWS - 1) / RSVP_PICK_ROWS;
+    for (uint8_t i = 0; i < pages && pages > 1; i++) {
+      int dx = CX - (pages - 1) * 13 + i * 26;
+      if (i == rsvpPickPage) gfx->fillCircle(dx, 420, 5, UI_INK);
+      else gfx->drawCircle(dx, 420, 4, UI_INK);
+    }
+    gfx->flush();
+    return;
+  }
+
+  if (rsvpDone) {
+    gfx->setTextSize(3);
+    gfx->setCursor(CX - (int)strlen(T(S_THE_END)) * 9, 200);
+    gfx->print(T(S_THE_END));
+    gfx->flush();
+    return;
+  }
+
+  // advance to the next word on schedule -- a side effect inside render(),
+  // same pattern renderQuiz() uses for its own countdown, so there is exactly
+  // one place that decides "is it time yet" for either screen
+  if (!rsvpPaused && millis() >= rsvpNextAt) {
+    if (!gBook.nextWord(rsvpWord, sizeof(rsvpWord))) {
+      rsvpDone = true;
+      rsvpSaveProgress(rsvpTitle, gBook.bytePos);
+      sfxPlay(SFX_MEDAL);
+      gfx->flush();
+      return;
+    }
+    rsvpScheduleNext();
+  }
+
+  // progress through the book, in bytes -- a word count would need a full
+  // pre-pass over the file, exactly what streaming exists to avoid
+  if (gBook.fileSize) {
+    uint8_t pct = (uint8_t)((uint64_t)gBook.bytePos * 100 / gBook.fileSize);
+    gfx->fillRoundRect(53, 76, 360, 8, 4, UI_TRACK);
+    gfx->fillRoundRect(53, 76, 360 * pct / 100, 8, 4, UI_BAR_OK);
+  }
+
+  gfx->setTextColor(UI_INK);
+  gfx->setTextSize(4);
+  gfx->setCursor(CX - (int)strlen(rsvpWord) * 12, 200);
+  gfx->print(rsvpWord);
+
+  if (rsvpPaused) {
+    const char *p = T(S_PAUSED);
+    gfx->setTextSize(2);
+    gfx->setTextColor(UI_BAR_WARN);
+    gfx->setCursor(CX - (int)strlen(p) * 6, 260);
+    gfx->print(p);
+  }
+
+  // speed control: same "- value +" idiom as volume/brightness in SETTINGS
+  for (int i = 0; i < 2; i++) {
+    int bx = i ? RSVP_SPD_PLUS_X : RSVP_SPD_MINUS_X;
+    bool live = i ? (rsvpWpm() < RSVP_WPM_MAX) : (rsvpWpm() > RSVP_WPM_MIN);
+    gfx->fillRoundRect(bx, RSVP_SPD_Y, RSVP_SPD_BTN_W, RSVP_SPD_BTN_H, 8,
+                       live ? UI_WHITE : UI_TRACK);
+    gfx->drawRoundRect(bx, RSVP_SPD_Y, RSVP_SPD_BTN_W, RSVP_SPD_BTN_H, 8, UI_INK);
+    gfx->setTextColor(live ? UI_INK : 0x8410);
+    gfx->setTextSize(2);
+    gfx->setCursor(bx + RSVP_SPD_BTN_W / 2 - 6, RSVP_SPD_Y + 6);
+    gfx->print(i ? "+" : "-");
+  }
+  char wl[16];
+  snprintf(wl, sizeof(wl), T(S_WPM_FMT), rsvpWpm());
+  gfx->setTextColor(UI_INK);
+  gfx->setTextSize(1);
+  gfx->setCursor(CX - (int)strlen(wl) * 3, RSVP_SPD_Y + 12);
+  gfx->print(wl);
+
   gfx->flush();
 }
 
@@ -6073,8 +6558,9 @@ void renderCard() {
 // ---------- menu overlay ----------
 
 // Row labels are built fresh each frame because two of them carry live counts.
-// Page-aware: slot 4 is always CLOSE, page 0 is today's four rows, page 1
-// currently has only WILD at slot 0 (1-3 are empty, drawMenu skips them).
+// Page-aware: slot 4 is always CLOSE, page 0 is today's four rows, page 1 has
+// RETIRE at slot 0, QUIZ at slot 1 and READ at slot 2 (3 is empty, drawMenu
+// skips it).
 static void menuRowLabel(int i, char *out, size_t n) {
   if (i == MENU_ROWS - 1) { snprintf(out, n, "%s", T(S_CLOSE)); return; }
   if (menuPage == 0) {
@@ -6086,6 +6572,10 @@ static void menuRowLabel(int i, char *out, size_t n) {
     }
   } else if (i == 0) {
     snprintf(out, n, "%s", T(S_RETIRE));
+  } else if (i == 1) {
+    snprintf(out, n, "%s", T(S_QUIZ));
+  } else if (i == 2) {
+    snprintf(out, n, "%s", T(S_READ));
   } else {
     out[0] = 0;
   }
@@ -6110,11 +6600,13 @@ void drawMenu() {
 
   for (int i = 0; i < MENU_ROWS; i++) {
     bool close = (i == MENU_ROWS - 1);
-    if (menuPage == 1 && i > 0 && !close) continue;   // empty slot: nothing drawn
+    if (menuPage == 1 && i > 2 && !close) continue;   // empty slot: nothing drawn
     int y = MENU_ROW_Y(i);
     bool dead = close ? false :
                 (menuPage == 0 && i == 3 && (pet.isEgg() || pet.ceremony != CER_NONE)) ||
-                (menuPage == 1 && i == 0 && !pet.canRetireNow());   // an egg or a companion
+                (menuPage == 1 && i == 0 && !pet.canRetireNow()) ||   // an egg or a companion
+                (menuPage == 1 && i == 1 &&
+                 (pet.isEgg() || pet.sleeping || pet.ceremony != CER_NONE));
     gfx->fillRoundRect(MENU_X + 18, y, MENU_W - 36, MENU_ROW_H, 12,
                        close || dead ? UI_TRACK : UI_BG_DAY);
     gfx->drawRoundRect(MENU_X + 18, y, MENU_W - 36, MENU_ROW_H, 12, UI_INK);

@@ -60,7 +60,7 @@ struct SdThumbs {
 };
 extern SdThumbs thumbs;
 
-bool sdBegin();                 // monta la SD por SPI dedicado, true si hay tarjeta
+bool sdBegin();                 // monta la SD (modo segun la placa, ver pin_config.h), true si hay tarjeta
 // The three species sdScanRegionArt() looks for to decide a region's pack is on
 // the card. Inline and free of any SD dependency so the tests can check them --
 // A PROBE MUST LAND ON A SPECIES THAT IS ACTUALLY PACKED. Alola's midpoint is

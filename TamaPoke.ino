@@ -1,17 +1,17 @@
 // TamaPoke - tamagotchi pixel art inspirado en la gen 1
-// PORTAGE para Waveshare ESP32-S3-Touch-AMOLED-1.43 (fork de la version 1.75)
 //
-// Diferencias de hardware vs la 1.75 original:
-//   - Pantalla: driver SH8601 (la 1.75 usa CO5300)
-//   - Tactil: FT3168 (la 1.75 usa CST9217)
-//   - SIN PMU AXP2101 -> sin gestion de bateria/boton PWR (ver rtcbat.cpp)
-//   - SIN codec ES8311 -> audio deshabilitado (ver audio.cpp, stub)
+// Firmware MULTI-PLACA: ver board_select.h para elegir el destino.
+//   - Waveshare ESP32-S3-Touch-AMOLED-1.75  (CO5300 QSPI, CST9217, AXP2101, ES8311)
+//   - Waveshare ESP32-S3-Touch-AMOLED-1.43  (SH8601 QSPI, FT3168, sin PMU, sin audio)
+//   - Waveshare ESP32-S3-Touch-LCD-2.8C     (ST7701 RGB565, GT911, expansor TCA9554)
+//     NUNCA PROBADO EN PLACA -- ver PORTAGE_28ROUND.md.
+// Cada una tiene su pin_config.h propio (ver ese archivo) y sus diferencias de
+// controlador se resuelven aqui abajo con #if TAMAPOKE_BOARD_*.
 //
 // Librerias (Library Manager o repo de Waveshare):
-//   - "GFX Library for Arduino" (moononournation), con soporte SH8601 QSPI
-//   - "SensorLib" (Lewis He), driver tactil FT3267/FT3168
-//     NOTA: verificar que la version instalada de SensorLib expone bien la
-//     clase FT3168 (a veces agrupada con FT3267, misma familia FocalTech).
+//   - "GFX Library for Arduino" (moononournation) -- CO5300/SH8601 QSPI y,
+//     para la 2.8C, Arduino_ESP32RGBPanel + Arduino_RGB_Display
+//   - "SensorLib" (Lewis He) -- touch CST92xx/FT6X36/GT911, IMU e RTC
 //
 // Placa: ESP32S3 Dev Module | Flash 16MB | PSRAM: OPI PSRAM | USB CDC On Boot: Enabled
 //
@@ -21,8 +21,16 @@
 #include <Wire.h>
 #include <Preferences.h>
 #include "Arduino_GFX_Library.h"
-#include "TouchDrvFT6X36.hpp"  // familia FocalTech (FT3267/FT3168) en SensorLib
 #include "pin_config.h"
+#if defined(TAMAPOKE_BOARD_175)
+#include "TouchDrvCSTXXX.hpp"     // CST9217
+#elif defined(TAMAPOKE_BOARD_143)
+#include "TouchDrvFT6X36.hpp"     // familia FocalTech (FT3267/FT3168) en SensorLib
+#elif defined(TAMAPOKE_BOARD_28ROUND)
+#include "TouchDrvGT911.hpp"
+#include "tca9554.h"              // expansor I2C: LCD_RESET/LCD_CS/TP_RESET/SD_CS
+#include "driver/spi_master.h"    // sub-bus de 3 hilos para el init del ST7701
+#endif
 #include "species.h"
 #include "dex.h"
 #include "types.h"
@@ -47,27 +55,203 @@
 // el instalador web). Se muestra en la pantalla de ajustes y por serie al arrancar.
 #define FW_VERSION "3.16"
 
+#if defined(TAMAPOKE_DISPLAY_QSPI_AMOLED)
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
   LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
-// PORTAGE 1.43: driver SH8601 en vez de CO5300. Arduino_GFX expone
-// Arduino_SH8601 con la misma firma que Arduino_CO5300 (mismo framebuffer
-// QSPI). col_offset1/row_offset1 (activos en rotation=0, ver Arduino_TFT::
+// col_offset1/row_offset1 (activos en rotation=0, ver Arduino_TFT::
 // setRotation) terminan siendo el x_start/y_start que setAddrWindow() suma a
-// cada CASET/PASET -- 6,0 aqui para que coincida con el CASET que se manda a
-// mano en setup() (ver el comentario ahi: la pantalla en negro NO era por
-// este offset -- 0,0,0,0 y 8,0,0,0 se probaron en placa y ambos daban negro
-// -- sino por dos comandos de init que le faltaban a este driver generico).
+// cada CASET/PASET. En la 1.43 (SH8601) la pantalla se quedaba en negro con
+// CUALQUIER offset -- 0,0,0,0 y 8,0,0,0 se probaron en placa -- hasta mandar
+// a mano dos comandos de init que le faltan al driver generico (ver setup());
+// 6,0 aqui es simplemente para que coincida con el CASET que ese init manda.
+#if defined(TAMAPOKE_BOARD_175)
+Arduino_CO5300 *panel = new Arduino_CO5300(
+  bus, LCD_RESET, 0 /*rotation*/, LCD_WIDTH, LCD_HEIGHT, 6, 0, 0, 0);
+#elif defined(TAMAPOKE_BOARD_143)
 Arduino_SH8601 *panel = new Arduino_SH8601(
   bus, LCD_RESET, 0 /*rotation*/, LCD_WIDTH, LCD_HEIGHT, 6, 0, 0, 0);
+#endif
 // Framebuffer completo en PSRAM: dibujamos todo y hacemos flush() (sin parpadeo)
-Arduino_Canvas *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, panel);
+Arduino_GFX *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, panel);
 
-// PORTAGE 1.43: FT3168 en vez de CST9217. Confirmado en el codigo fuente de
-// SensorLib: TouchDrvFocalTech.hpp agrupa toda la familia FocalTech
-// FT3267/FT5206/FT6X36 (misma familia que el FT3168) bajo esta unica clase,
-// con FT3267_SLAVE_ADDRESS == FT6X36_SLAVE_ADDRESS == 0x38 -- no existe una
-// TouchDrvFT3168 ni TouchDrvFT3267 separada.
+#if defined(TAMAPOKE_BOARD_175)
+TouchDrvCST92xx touch;
+#elif defined(TAMAPOKE_BOARD_143)
+// FT3168: confirmado en el codigo fuente de SensorLib que TouchDrvFocalTech.hpp
+// agrupa toda la familia FocalTech FT3267/FT5206/FT6X36 (misma familia que el
+// FT3168) bajo esta unica clase, con FT3267_SLAVE_ADDRESS ==
+// FT6X36_SLAVE_ADDRESS == 0x38 -- no existe una TouchDrvFT3168 separada.
 TouchDrvFT6X36 touch;
+#endif
+
+#elif defined(TAMAPOKE_DISPLAY_RGB_ST7701)
+// PORTAGE 2.8" redonda -- NUNCA PROBADO EN PLACA, ver PORTAGE_28ROUND.md.
+// Panel RGB565 paralelo: no hay bus QSPI ni clase Arduino_GFX especifica de
+// ST7701. El init del chip (registros, no pixeles) se manda a mano en setup()
+// por un sub-bus SPI de 3 hilos propio (ver st7701InitSequence() mas abajo);
+// Arduino_ESP32RGBPanel + Arduino_RGB_Display solo se ocupan de empujar
+// pixeles una vez el panel ya esta inicializado.
+Arduino_ESP32RGBPanel *rgbBus = new Arduino_ESP32RGBPanel(
+  LCD_DE, LCD_VSYNC, LCD_HSYNC, LCD_PCLK,
+  LCD_R0, LCD_R1, LCD_R2, LCD_R3, LCD_R4,
+  LCD_G0, LCD_G1, LCD_G2, LCD_G3, LCD_G4, LCD_G5,
+  LCD_B0, LCD_B1, LCD_B2, LCD_B3, LCD_B4,
+  0 /*hsync_polarity*/, 50 /*hsync_front_porch*/, 8 /*hsync_pulse_width*/, 10 /*hsync_back_porch*/,
+  0 /*vsync_polarity*/, 8 /*vsync_front_porch*/, 2 /*vsync_pulse_width*/, 18 /*vsync_back_porch*/,
+  0 /*pclk_active_neg*/, 30000000 /*prefer_speed*/);
+// bus=nullptr, rst=GFX_NOT_DEFINED, init_operations=nullptr: el reset y el
+// init del ST7701 se hacen a mano (RESET/CS via el expansor TCA9554) ANTES de
+// gfx->begin(), asi que Arduino_RGB_Display no debe tocar ninguno de los dos.
+Arduino_GFX *gfx = new Arduino_RGB_Display(
+  LCD_WIDTH, LCD_HEIGHT, rgbBus, 0 /*rotation*/, true /*auto_flush*/,
+  nullptr, GFX_NOT_DEFINED, nullptr, 0);
+
+TouchDrvGT911 touch;
+#endif
+
+// Un unico punto para el brillo: en las AMOLED es un registro del panel
+// (0..255); en la 2.8" redonda es el PWM del backlight (sin panel emisivo,
+// la "pantalla en negro" no existe de la misma forma -- ver PORTAGE_28ROUND.md
+// sobre por que el backlight necesita su propio ledcAttach en setup()).
+void setPanelBrightness(uint8_t v) {
+#if defined(TAMAPOKE_DISPLAY_QSPI_AMOLED)
+  panel->setBrightness(v);
+#elif defined(TAMAPOKE_DISPLAY_RGB_ST7701)
+  ledcWrite(LCD_BACKLIGHT, (uint32_t)v * 4);  // 0..255 -> 0..1020 sobre 10 bits
+#endif
+}
+
+#if defined(TAMAPOKE_DISPLAY_RGB_ST7701)
+// Init del ST7701, PORTADO CASI LITERAL del ejemplo oficial Waveshare
+// (ESP32-S3-Touch-LCD-2.8C-Demo.zip, Arduino/examples/LVGL_Arduino/
+// Display_ST7701.cpp: ST7701_WriteCommand/WriteData/Init/Reset/CS_EN/CS_Dis).
+// NUNCA PROBADO EN PLACA -- ver PORTAGE_28ROUND.md. Los valores de esta tabla
+// son de calibracion de gamma/timing propios del lote de panel; no se han
+// tocado a proposito, tal como los entrego Waveshare.
+static spi_device_handle_t gSt7701Spi = nullptr;
+
+static void st7701Cmd(uint8_t cmd) {
+  spi_transaction_t t = {};
+  t.cmd = 0;
+  t.addr = cmd;
+  spi_device_transmit(gSt7701Spi, &t);
+}
+static void st7701Dat(uint8_t data) {
+  spi_transaction_t t = {};
+  t.cmd = 1;
+  t.addr = data;
+  spi_device_transmit(gSt7701Spi, &t);
+}
+
+static void st7701Reset() {
+  tca9554Write(EXIO_LCD_RESET, true);
+  delay(10);
+  tca9554Write(EXIO_LCD_RESET, false);
+  delay(10);
+  tca9554Write(EXIO_LCD_RESET, true);
+  delay(50);
+}
+
+static void st7701Init() {
+  spi_bus_config_t buscfg = {};
+  buscfg.mosi_io_num = LCD_INIT_MOSI;
+  buscfg.miso_io_num = -1;
+  buscfg.sclk_io_num = LCD_INIT_SCK;
+  buscfg.quadwp_io_num = -1;
+  buscfg.quadhd_io_num = -1;
+  buscfg.max_transfer_sz = 64;
+  spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+  spi_device_interface_config_t devcfg = {};
+  devcfg.command_bits = 1;   // 0=comando, 1=dato -- protocolo de 3 hilos del ST7701
+  devcfg.address_bits = 8;   // el byte real (comando o dato) viaja en "address"
+  devcfg.mode = 0;
+  devcfg.clock_speed_hz = 40000000;
+  devcfg.spics_io_num = -1;  // CS lo maneja el expansor TCA9554, no la SPI
+  devcfg.queue_size = 1;
+  spi_bus_add_device(SPI2_HOST, &devcfg, &gSt7701Spi);
+
+  st7701Reset();
+  tca9554Write(EXIO_LCD_CS, false);  // activo bajo
+  delay(10);
+
+  st7701Cmd(0xFF); st7701Dat(0x77); st7701Dat(0x01); st7701Dat(0x00); st7701Dat(0x00); st7701Dat(0x13);
+  st7701Cmd(0xEF); st7701Dat(0x08);
+  st7701Cmd(0xFF); st7701Dat(0x77); st7701Dat(0x01); st7701Dat(0x00); st7701Dat(0x00); st7701Dat(0x10);
+  st7701Cmd(0xC0); st7701Dat(0x3B); st7701Dat(0x00);
+  st7701Cmd(0xC1); st7701Dat(0x10); st7701Dat(0x0C);
+  st7701Cmd(0xC2); st7701Dat(0x07); st7701Dat(0x0A);
+  st7701Cmd(0xC7); st7701Dat(0x00);
+  st7701Cmd(0xCC); st7701Dat(0x10);
+  st7701Cmd(0xCD); st7701Dat(0x08);
+  st7701Cmd(0xB0);
+  st7701Dat(0x05); st7701Dat(0x12); st7701Dat(0x98); st7701Dat(0x0E); st7701Dat(0x0F); st7701Dat(0x07);
+  st7701Dat(0x07); st7701Dat(0x09); st7701Dat(0x09); st7701Dat(0x23); st7701Dat(0x05); st7701Dat(0x52);
+  st7701Dat(0x0F); st7701Dat(0x67); st7701Dat(0x2C); st7701Dat(0x11);
+  st7701Cmd(0xB1);
+  st7701Dat(0x0B); st7701Dat(0x11); st7701Dat(0x97); st7701Dat(0x0C); st7701Dat(0x12); st7701Dat(0x06);
+  st7701Dat(0x06); st7701Dat(0x08); st7701Dat(0x08); st7701Dat(0x22); st7701Dat(0x03); st7701Dat(0x51);
+  st7701Dat(0x11); st7701Dat(0x66); st7701Dat(0x2B); st7701Dat(0x0F);
+  st7701Cmd(0xFF); st7701Dat(0x77); st7701Dat(0x01); st7701Dat(0x00); st7701Dat(0x00); st7701Dat(0x11);
+  st7701Cmd(0xB0); st7701Dat(0x5D);
+  st7701Cmd(0xB1); st7701Dat(0x3E);
+  st7701Cmd(0xB2); st7701Dat(0x81);
+  st7701Cmd(0xB3); st7701Dat(0x80);
+  st7701Cmd(0xB5); st7701Dat(0x4E);
+  st7701Cmd(0xB7); st7701Dat(0x85);
+  st7701Cmd(0xB8); st7701Dat(0x20);
+  st7701Cmd(0xC1); st7701Dat(0x78);
+  st7701Cmd(0xC2); st7701Dat(0x78);
+  st7701Cmd(0xD0); st7701Dat(0x88);
+  st7701Cmd(0xE0); st7701Dat(0x00); st7701Dat(0x00); st7701Dat(0x02);
+  st7701Cmd(0xE1);
+  st7701Dat(0x06); st7701Dat(0x30); st7701Dat(0x08); st7701Dat(0x30); st7701Dat(0x05); st7701Dat(0x30);
+  st7701Dat(0x07); st7701Dat(0x30); st7701Dat(0x00); st7701Dat(0x33); st7701Dat(0x33);
+  st7701Cmd(0xE2);
+  st7701Dat(0x11); st7701Dat(0x11); st7701Dat(0x33); st7701Dat(0x33); st7701Dat(0xF4); st7701Dat(0x00);
+  st7701Dat(0x00); st7701Dat(0x00); st7701Dat(0xF4); st7701Dat(0x00); st7701Dat(0x00); st7701Dat(0x00);
+  st7701Cmd(0xE3); st7701Dat(0x00); st7701Dat(0x00); st7701Dat(0x11); st7701Dat(0x11);
+  st7701Cmd(0xE4); st7701Dat(0x44); st7701Dat(0x44);
+  st7701Cmd(0xE5);
+  st7701Dat(0x0D); st7701Dat(0xF5); st7701Dat(0x30); st7701Dat(0xF0); st7701Dat(0x0F); st7701Dat(0xF7);
+  st7701Dat(0x30); st7701Dat(0xF0); st7701Dat(0x09); st7701Dat(0xF1); st7701Dat(0x30); st7701Dat(0xF0);
+  st7701Dat(0x0B); st7701Dat(0xF3); st7701Dat(0x30); st7701Dat(0xF0);
+  st7701Cmd(0xE6); st7701Dat(0x00); st7701Dat(0x00); st7701Dat(0x11); st7701Dat(0x11);
+  st7701Cmd(0xE7); st7701Dat(0x44); st7701Dat(0x44);
+  st7701Cmd(0xE8);
+  st7701Dat(0x0C); st7701Dat(0xF4); st7701Dat(0x30); st7701Dat(0xF0); st7701Dat(0x0E); st7701Dat(0xF6);
+  st7701Dat(0x30); st7701Dat(0xF0); st7701Dat(0x08); st7701Dat(0xF0); st7701Dat(0x30); st7701Dat(0xF0);
+  st7701Dat(0x0A); st7701Dat(0xF2); st7701Dat(0x30); st7701Dat(0xF0);
+  st7701Cmd(0xE9); st7701Dat(0x36); st7701Dat(0x01);
+  st7701Cmd(0xEB);
+  st7701Dat(0x00); st7701Dat(0x01); st7701Dat(0xE4); st7701Dat(0xE4); st7701Dat(0x44); st7701Dat(0x88);
+  st7701Dat(0x40);
+  st7701Cmd(0xED);
+  st7701Dat(0xFF); st7701Dat(0x10); st7701Dat(0xAF); st7701Dat(0x76); st7701Dat(0x54); st7701Dat(0x2B);
+  st7701Dat(0xCF); st7701Dat(0xFF); st7701Dat(0xFF); st7701Dat(0xFC); st7701Dat(0xB2); st7701Dat(0x45);
+  st7701Dat(0x67); st7701Dat(0xFA); st7701Dat(0x01); st7701Dat(0xFF);
+  st7701Cmd(0xEF);
+  st7701Dat(0x08); st7701Dat(0x08); st7701Dat(0x08); st7701Dat(0x45); st7701Dat(0x3F); st7701Dat(0x54);
+  st7701Cmd(0xFF); st7701Dat(0x77); st7701Dat(0x01); st7701Dat(0x00); st7701Dat(0x00); st7701Dat(0x00);
+
+  st7701Cmd(0x11); delay(120);       // sleep out
+  st7701Cmd(0x3A); st7701Dat(0x66);  // formato de pixel: RGB565
+  st7701Cmd(0x36); st7701Dat(0x00);  // MADCTL
+  st7701Cmd(0x35); st7701Dat(0x00);  // tearing effect on
+  st7701Cmd(0x29);                   // display on
+
+  tca9554Write(EXIO_LCD_CS, true);
+  delay(10);
+
+  // Libera el bus SPI2_HOST: el init del ST7701 es lo UNICO que lo necesita
+  // (el dibujado normal va por el periferico RGB paralelo, no por aqui). La
+  // SD comparte los mismos pines MOSI/SCK (ver pin_config.h) y los reclama
+  // de nuevo, fresca, en sdBegin() -- sin esto, spi_bus_initialize() para la
+  // SD fallaria con "ya inicializado".
+  spi_bus_remove_device(gSt7701Spi);
+  spi_bus_free(SPI2_HOST);
+}
+#endif
+
 Pet pet;
 
 // sprite animado de la SD para la especie actual (si existe el archivo)
@@ -748,9 +932,20 @@ void setup() {
   // handleTouch).
   Wire.setTimeOut(50);
 
-  // PORTAGE 1.43: sin PMU, el rail de la pantalla se activa directamente por
-  // GPIO (LCD_EN) en vez de pmuEnablePanel() (que ahora es un no-op, ver
-  // rtcbat.cpp). Hay que hacerlo ANTES de gfx->begin() igual que en el original.
+#if defined(TAMAPOKE_BOARD_175)
+  // CRITICO: encender la alimentacion del panel (BLDO1=OLED VDD 3.3V) ANTES de
+  // inicializar el display. Si el PMU se reseteo (drenaje total), este rail
+  // queda OFF y la pantalla se ve negra aunque el resto de la placa funcione.
+  pmuEnablePanel();
+  // QSPI a 80MHz (por defecto 40): el flush del framebuffer es el cuello de
+  // botella del fps (~56ms a 40MHz). Si el panel mostrara basura, bajar a 40M.
+  if (!gfx->begin(80000000)) Serial.println("gfx->begin() fallo");
+  setPanelBrightness(180);
+
+#elif defined(TAMAPOKE_BOARD_143)
+  // Sin PMU, el rail de la pantalla se activa directamente por GPIO (LCD_EN)
+  // en vez de pmuEnablePanel() (que aqui es un no-op, ver rtcbat.cpp). Hay que
+  // hacerlo ANTES de gfx->begin().
   pinMode(LCD_EN, OUTPUT);
   // El esquematico oficial muestra R9, en la red OLED_EN, como "NC" (no
   // montada) -- probado en placa: ni HIGH ni LOW cambia nada, confirmando que
@@ -790,11 +985,38 @@ void setup() {
   bus->writeCommand(0x29);
   bus->endWrite();
 
-  panel->setBrightness(180);
+  setPanelBrightness(180);
 
-  // PORTAGE 1.43: direccion I2C del FT3168 -- 0x38, confirmado en el codigo
-  // fuente de SensorLib (FT3267_SLAVE_ADDRESS/FT6X36_SLAVE_ADDRESS), distinto
-  // del 0x5A del CST9217 original.
+#elif defined(TAMAPOKE_BOARD_28ROUND)
+  // NUNCA PROBADO EN PLACA -- ver PORTAGE_28ROUND.md.
+  tca9554Begin();
+  st7701Init();  // reset + secuencia de registros del ST7701 (CS por el expansor)
+  if (!gfx->begin()) Serial.println("gfx->begin() fallo");
+  ledcAttach(LCD_BACKLIGHT, 20000 /*Hz*/, 10 /*bits*/);
+  setPanelBrightness(180);
+#endif
+
+#if defined(TAMAPOKE_BOARD_175)
+  touch.setPins(TP_RESET, TP_INT);
+  bool touchOk = false;
+  for (int i = 0; i < 3 && !touchOk; i++) {  // a veces falla al primer intento
+    touchOk = touch.begin(Wire, 0x5A, IIC_SDA, IIC_SCL);
+    if (!touchOk) delay(150);
+  }
+  if (!touchOk) Serial.println("CST9217 no detectado");
+  // begin() deja el chip en modo comando (lee la identidad y no sale);
+  // hace falta un reset por hardware para que vuelva a reportar toques
+  touch.reset();
+  touch.setMaxCoordinates(LCD_WIDTH, LCD_HEIGHT);
+  touch.setMirrorXY(true, true);  // el panel esta montado girado 180 grados
+  // INT activo-bajo: salta cuando hay datos. Gatea las lecturas I2C (ver loop)
+  pinMode(TP_INT, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(TP_INT), touchIsr, FALLING);
+
+#elif defined(TAMAPOKE_BOARD_143)
+  // Direccion I2C del FT3168 -- 0x38, confirmado en el codigo fuente de
+  // SensorLib (FT3267_SLAVE_ADDRESS/FT6X36_SLAVE_ADDRESS), distinto del 0x5A
+  // del CST9217 de la 1.75.
   if (TP_RESET >= 0) touch.setPins(TP_RESET, TP_INT);
   bool touchOk = false;
   for (int i = 0; i < 3 && !touchOk; i++) {  // a veces falla al primer intento
@@ -808,19 +1030,44 @@ void setup() {
   touch.setMaxCoordinates(LCD_WIDTH, LCD_HEIGHT);
   touch.setMirrorXY(true, true);  // el panel esta montado girado 180 grados (a confirmar en esta placa)
   // INT activo-bajo: salta cuando hay datos. Gatea las lecturas I2C (ver loop).
-  // PORTAGE 1.43: TP_INT/TP_RESET no existen en esta placa -- confirmado en
-  // el esquematico oficial (el conector J9 "LCD" solo expone TP_SDA/TP_SCL;
-  // el tactil vive en el modulo de pantalla junto con IMU y RTC en el mismo
-  // bus I2C, sin lineas propias de INT/RESET). pin_config.h los deja en -1 a
-  // proposito, no como placeholder pendiente. Sin IRQ, handleTouch() cae a
-  // polling puro a 50Hz (ver gTouchIrq mas abajo) -- funciona pero gasta mas
-  // ciclos I2C que una interrupcion.
+  // TP_INT/TP_RESET no existen en esta placa -- confirmado en el esquematico
+  // oficial (el conector J9 "LCD" solo expone TP_SDA/TP_SCL; el tactil vive en
+  // el modulo de pantalla junto con IMU y RTC en el mismo bus I2C, sin lineas
+  // propias de INT/RESET). pin_config.h los deja en -1 a proposito, no como
+  // placeholder pendiente. Sin IRQ, handleTouch() cae a polling puro a 50Hz
+  // (ver gTouchIrq mas abajo) -- funciona pero gasta mas ciclos I2C que una
+  // interrupcion.
   if (TP_INT >= 0) {
     pinMode(TP_INT, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(TP_INT), touchIsr, FALLING);
   } else {
     Serial.println("TP_INT no definido: touch en modo polling (ver pin_config.h)");
   }
+
+#elif defined(TAMAPOKE_BOARD_28ROUND)
+  // NUNCA PROBADO EN PLACA -- ver PORTAGE_28ROUND.md. GT911, direccion 0x5D
+  // por defecto (el demo oficial la deja implicita via TouchDrvGT911; 0x14 es
+  // la otra direccion posible del GT911 segun el estado de su propio pin de
+  // seleccion en el arranque -- a comprobar si no responde).
+  tca9554Write(EXIO_TP_RESET, true);
+  delay(10);
+  tca9554Write(EXIO_TP_RESET, false);  // reset activo-bajo del GT911
+  delay(10);
+  tca9554Write(EXIO_TP_RESET, true);
+  delay(50);
+  bool touchOk = false;
+  for (int i = 0; i < 3 && !touchOk; i++) {
+    touchOk = touch.begin(Wire, 0x5D, IIC_SDA, IIC_SCL);
+    if (!touchOk) delay(150);
+  }
+  if (!touchOk) Serial.println("GT911 no detectado");
+  touch.setMaxCoordinates(LCD_WIDTH, LCD_HEIGHT);
+  touch.setMirrorXY(false, false);  // orientacion sin confirmar, ver PORTAGE_28ROUND.md
+  if (TP_INT >= 0) {
+    pinMode(TP_INT, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(TP_INT), touchIsr, FALLING);
+  }
+#endif
 
   party.begin();
   pet.begin();
@@ -994,7 +1241,7 @@ void updateBrightness(uint32_t now) {
   static uint8_t current = 255;
   if (target != current) {
     current = target;
-    panel->setBrightness(target);
+    setPanelBrightness(target);
   }
 }
 

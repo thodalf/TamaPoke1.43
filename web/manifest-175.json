@@ -1,0 +1,28 @@
+{
+  "name": "TamaPoke (Waveshare ESP32-S3-Touch-AMOLED-1.75)",
+  "version": "3.16",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "firmware/175/bootloader.bin",
+          "offset": 0
+        },
+        {
+          "path": "firmware/175/partitions.bin",
+          "offset": 32768
+        },
+        {
+          "path": "firmware/175/boot_app0.bin",
+          "offset": 57344
+        },
+        {
+          "path": "firmware/175/app.bin",
+          "offset": 65536
+        }
+      ]
+    }
+  ]
+}

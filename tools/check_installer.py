@@ -24,9 +24,11 @@ Both are checked here because fixing either one alone still loses the save.
 The partition table is read out of the build itself rather than hardcoded, so a
 partition scheme change moves the check with it.
 
-    python3 tools/check_installer.py            # checks web/manifest.json
+    python3 tools/check_installer.py                  # checks web/manifest.json
+    python3 tools/check_installer.py manifest-175.json # or any other manifest in web/
 
-Run by build_web.sh on every build, so neither cause can come back.
+Run by build_web.sh for every board's manifest on every build, so neither
+cause can come back for any of them.
 """
 import json
 import os
@@ -53,7 +55,8 @@ def partitions(path):
 
 
 def main():
-    manifest_path = os.path.join(WEB, "manifest.json")
+    name = sys.argv[1] if len(sys.argv) > 1 else "manifest.json"
+    manifest_path = os.path.join(WEB, name)
     manifest = json.load(open(manifest_path))
 
     parts = []

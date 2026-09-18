@@ -4,12 +4,6 @@
 #include <time.h>
 #include <SensorPCF85063.hpp>
 
-// NOTA PORTAGE 1.43: esta placa no tiene PMU AXP2101 (a diferencia de la
-// 1.75), asi que toda la seccion XPowersLib/bateria/boton PWR del original
-// fue eliminada. Las funciones se mantienen como stubs para no tener que
-// tocar TamaPoke.ino, que las llama en varios puntos (brillo segun USB,
-// icono de bateria, etc).
-
 static SensorPCF85063 rtc;
 static bool rtcOk = false;
 
@@ -43,15 +37,85 @@ void rtcSetEpoch(uint32_t e) {
                                tmv.tm_hour, tmv.tm_min, tmv.tm_sec));
 }
 
-// ---- stubs sin PMU (ver nota arriba) ----
+// ---------------------------------------------------------------------------
+#if defined(TAMAPOKE_HAS_PMU)
+// 1.75: PMU AXP2101 real -- bateria, rail de la pantalla y boton PWR.
+// ---------------------------------------------------------------------------
+#include <XPowersLib.h>
+
+static XPowersPMU pmu;
+static bool pmuOk = false;
+
+bool batBegin() {
+  pmuOk = pmu.begin(Wire, AXP2101_SLAVE_ADDRESS, IIC_SDA, IIC_SCL);
+  if (!pmuOk) Serial.println("AXP2101 no detectado");
+  return pmuOk;
+}
+
+// Enciende la alimentacion de la AMOLED. En la Waveshare 1.75 el panel (OLED VDD)
+// cuelga del rail BLDO1 a 3.3V del AXP2101. El firmware daba por hecho que estaba
+// encendido; si el PMU se resetea (drenaje total), BLDO1 queda OFF y la pantalla
+// se ve negra aunque el resto funcione. Hay que llamarla ANTES de gfx->begin().
+void pmuEnablePanel() {
+  if (!pmu.begin(Wire, AXP2101_SLAVE_ADDRESS, IIC_SDA, IIC_SCL)) {
+    Serial.println("AXP2101 no detectado (pmuEnablePanel)");
+    return;
+  }
+  pmu.setBLDO1Voltage(3300);   // OLED VDD
+  pmu.enableBLDO1();
+}
+
+// el estado de energia (I2C) se cachea ~2 s: leerlo en cada frame del loop
+// metia trafico I2C inutil y podia oscilar (parpadeo de brillo)
+static uint32_t powerCacheT = 0;
+static int cachedPct = -1;
+static bool cachedCharging = false, cachedUsb = true;
+
+static void refreshPower() {
+  uint32_t now = millis();
+  if (powerCacheT && now - powerCacheT < 2000) return;
+  powerCacheT = now ? now : 1;
+  if (!pmuOk) { cachedPct = -1; cachedCharging = false; cachedUsb = true; return; }
+  cachedPct = pmu.isBatteryConnect() ? pmu.getBatteryPercent() : -1;
+  cachedCharging = pmu.isCharging();
+  cachedUsb = pmu.isVbusIn();
+}
+
+int batPercent() { refreshPower(); return cachedPct; }
+bool batCharging() { refreshPower(); return cachedCharging; }
+bool usbPresent() { refreshPower(); return cachedUsb; }
+
+void pwrSetup() {
+  if (!pmuOk) return;
+  pmu.setPowerKeyPressOffTime(XPOWERS_POWEROFF_4S);
+  pmu.disableIRQ(XPOWERS_AXP2101_ALL_IRQ);
+  pmu.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ);
+  pmu.clearIrqStatus();
+}
+
+bool pwrShortPressed() {
+  if (!pmuOk) return false;
+  pmu.getIrqStatus();
+  bool hit = pmu.isPekeyShortPressIrq();
+  if (hit) pmu.clearIrqStatus();
+  return hit;
+}
+
+#else
+// ---------------------------------------------------------------------------
+// 1.43 y 2.8" redonda: sin PMU (ni AXP2101 ni equivalente), solo un IC
+// cargador simple (ETA6098 en ambas) y un divisor resistivo por ADC. Sin
+// gestion de bateria por I2C, sin boton PWR dedicado -- estas funciones son
+// stubs para no tener que tocar TamaPoke.ino, que las llama en varios puntos
+// (brillo segun USB, icono de bateria, etc).
+// ---------------------------------------------------------------------------
 
 bool batBegin() { return false; }
 
 void pmuEnablePanel() {
-  // En la 1.75 esto encendia el rail BLDO1 del AXP2101. En la 1.43 el rail
-  // de la pantalla se controla directamente por GPIO (LCD_EN, ver
-  // TamaPoke.ino: pinMode(LCD_EN, OUTPUT); digitalWrite(LCD_EN, HIGH);
-  // ANTES de gfx->begin()) -- no hace falta nada aqui.
+  // El rail de la pantalla se controla por GPIO (1.43: LCD_EN) o ya viene
+  // siempre alimentado (2.8" redonda, sin pin de habilitacion en el
+  // esquematico) -- no hace falta nada aqui en ninguna de las dos.
 }
 
 int batPercent() { return -1; }      // sin PMU: no se puede leer % de bateria
@@ -59,7 +123,9 @@ bool batCharging() { return false; }
 bool usbPresent() { return true; }   // sin deteccion VBUS: asumimos alimentado
 
 void pwrSetup() {
-  // Sin boton PWR dedicado en esta placa (solo BOOT/RESET) -- nada que armar
+  // Sin boton PWR dedicado en estas placas (solo BOOT/RESET) -- nada que armar
 }
 
 bool pwrShortPressed() { return false; }
+
+#endif

@@ -50,13 +50,14 @@ Arduino_DataBus *bus = new Arduino_ESP32QSPI(
   LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
 // PORTAGE 1.43: driver SH8601 en vez de CO5300. Arduino_GFX expone
 // Arduino_SH8601 con la misma firma que Arduino_CO5300 (mismo framebuffer
-// QSPI), pero el offset (6,0,0,0) del original es del panel CO5300 de la
-// 1.75 y NO se traslada al SH8601: en el ejemplo oficial de LilyGO para un
-// panel SH8601 466x466 equivalente (T-Display-S3-AMOLED-1.43-1.75,
-// variante DO0143FAT01) el offset es (0,0,0,0) -- el 6,0,0,0 de ese mismo
-// repo es la rama CO5300 (H0175Y003AM/DO0143FMST10), no la SH8601.
+// QSPI). col_offset1/row_offset1 (activos en rotation=0, ver Arduino_TFT::
+// setRotation) terminan siendo el x_start/y_start que setAddrWindow() suma a
+// cada CASET/PASET -- 6,0 aqui para que coincida con el CASET que se manda a
+// mano en setup() (ver el comentario ahi: la pantalla en negro NO era por
+// este offset -- 0,0,0,0 y 8,0,0,0 se probaron en placa y ambos daban negro
+// -- sino por dos comandos de init que le faltaban a este driver generico).
 Arduino_SH8601 *panel = new Arduino_SH8601(
-  bus, LCD_RESET, 0 /*rotation*/, LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
+  bus, LCD_RESET, 0 /*rotation*/, LCD_WIDTH, LCD_HEIGHT, 6, 0, 0, 0);
 // Framebuffer completo en PSRAM: dibujamos todo y hacemos flush() (sin parpadeo)
 Arduino_Canvas *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, panel);
 
@@ -717,13 +718,44 @@ void setup() {
   // GPIO (LCD_EN) en vez de pmuEnablePanel() (que ahora es un no-op, ver
   // rtcbat.cpp). Hay que hacerlo ANTES de gfx->begin() igual que en el original.
   pinMode(LCD_EN, OUTPUT);
+  // El esquematico oficial muestra R9, en la red OLED_EN, como "NC" (no
+  // montada) -- probado en placa: ni HIGH ni LOW cambia nada, confirmando que
+  // este GPIO no llega realmente al panel en esta placa. Se deja en HIGH por
+  // si una revision futura si la monta.
   digitalWrite(LCD_EN, HIGH);
-  delay(10);
+  delay(150);
   pmuEnablePanel();  // no-op en esta placa, se deja por compatibilidad
 
-  // QSPI a 80MHz (por defecto 40): el flush del framebuffer es el cuello de
-  // botella del fps (~56ms a 40MHz). Si el panel mostrara basura, bajar a 40M.
-  if (!gfx->begin(80000000)) Serial.println("gfx->begin() fallo");
+  // QSPI a 40MHz: no probado a 80 con el arreglo de abajo, subir con cuidado.
+  if (!gfx->begin(40000000)) Serial.println("gfx->begin() fallo");
+
+  // El driver generico Arduino_SH8601 (GFX Library for Arduino) NO manda dos
+  // comandos que el ejemplo OFICIAL de Waveshare para este mismo chip SI manda
+  // antes que cualquier otro (repo waveshareteam/ESP32-S3-Touch-AMOLED-1.43C,
+  // bsp_lcd_init()): 0xFE=0x00 (seleccion de pagina del fabricante) y
+  // 0xC4=0x80 (control de modo SPI, que pone al chip en modo QSPI). Sin esto
+  // la pantalla queda completamente negra -- confirmado en placa: probado sin
+  // esto con varios offsets de panel y las dos polaridades de LCD_EN, sin
+  // ningun cambio, y con esto funciona a la primera. Reenviamos la secuencia
+  // oficial completa a mano, en el mismo orden que bsp_lcd_init().
+  bus->beginWrite();
+  bus->writeC8D8(0xFE, 0x00);
+  bus->writeC8D8(0xC4, 0x80);
+  bus->writeC8D8(0x3A, 0x55);
+  bus->writeC8D8(0x35, 0x00);
+  bus->writeC8D8(0x53, 0x20);
+  bus->writeC8D8(0x51, 0xFF);
+  bus->writeC8D8(0x36, 0xC0);
+  bus->writeC8D8(0x63, 0xFF);
+  bus->writeC8D16D16(0x2A, 0x0006, 0x01D7);
+  bus->writeC8D16D16(0x2B, 0x0000, 0x01D1);
+  bus->writeCommand(0x11);
+  bus->endWrite();
+  delay(120);
+  bus->beginWrite();
+  bus->writeCommand(0x29);
+  bus->endWrite();
+
   panel->setBrightness(180);
 
   // PORTAGE 1.43: direccion I2C del FT3168 -- 0x38, confirmado en el codigo

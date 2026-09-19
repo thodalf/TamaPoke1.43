@@ -80,4 +80,13 @@ uint8_t aiChooseMove(const Combatant &self, const Combatant &foe, bool smart);
 // table for these two numbers; a change here is a balance change.
 #define CATCH_MIN_PCT 15
 #define CATCH_MAX_PCT 85
-uint8_t captureChancePct(const Combatant &foe);
+// A Masterball ADDS this many points rather than guaranteeing the catch --
+// the request was "raises the odds", not "always works" like the mainline
+// games' Masterball.
+#define CATCH_MASTER_BONUS_PCT 35
+uint8_t captureChancePct(const Combatant &foe, bool masterBall);
+
+// The same clamp-to-maxHp heal every move's EF_HEAL/EF_DRAIN already uses
+// (see heal() in battle.cpp), exposed so a Potion used from the battle bag
+// heals through the identical path rather than a second copy of the clamp.
+void battleHeal(Combatant &c, uint16_t amount);

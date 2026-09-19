@@ -229,6 +229,7 @@ void pmuEnablePanel() {}
 int batPercent() { return 87; }
 bool batCharging() { return false; }
 bool usbPresent() { return true; }
+uint32_t batRawMv() { return 4000; }
 void pwrSetup() {}
 bool pwrShortPressed() { return false; }
 

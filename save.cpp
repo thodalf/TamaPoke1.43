@@ -13,6 +13,7 @@ const SaveField SAVE_FIELDS[] = {
   { "eggT2", SK_I16 },  { "crack", SK_U8 },   { "mist", SK_U8 },
   { "sleep", SK_BOOL }, { "lend", SK_U8 },    { "seen", SK_U32 },
   { "bond", SK_U8 },    { "nick", SK_STR },   { "froz", SK_BOOL },
+  { "expk", SK_U8 },    { "expr", SK_U32 },
   // individual values and training
   { "ivat", SK_U8 },    { "ivdf", SK_U8 },    { "ivsp", SK_U8 },
   { "ivhp", SK_U8 },    { "tatk", SK_U8 },    { "tdef", SK_U8 },
@@ -31,6 +32,8 @@ const SaveField SAVE_FIELDS[] = {
   { "medal", SK_U16 },  { "tmedal", SK_U16 }, { "mstone", SK_U16 },
   { "ghi", SK_U16 },    { "shi", SK_U16 },    { "qhi", SK_U16 },   { "vhi", SK_U16 },
   { "whi", SK_U16 },
+  // the inventory: player-wide, like the badges above
+  { "pkba", SK_U8 },    { "mstb", SK_U8 },    { "pots", SK_U8 },
   // the banked creatures
   { "party", SK_BYTES }, { "box", SK_BYTES },
   // settings, so a restored device plays the way it did

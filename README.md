@@ -3,7 +3,7 @@
 [![Flash in browser](https://img.shields.io/badge/flash-in%20browser-FF6B00?logo=googlechrome&logoColor=white)](https://dylanpdao.github.io/TamaPoke/web/)
 [![MakerWorld](https://img.shields.io/badge/MakerWorld-3D%20case-00AE42?logo=bambulab&logoColor=white)](https://makerworld.com/es/models/2937822-tamapoke-a-pokemon-pokeball-tamagotchi)
 ![Board](https://img.shields.io/badge/board-ESP32--S3%20round%20AMOLED-E7352C?logo=espressif&logoColor=white)
-![Firmware](https://img.shields.io/badge/firmware-v3.19-8A2BE2)
+![Firmware](https://img.shields.io/badge/firmware-v3.21-8A2BE2)
 ![Code](https://img.shields.io/badge/code-MIT-blue)
 ![Languages](https://img.shields.io/badge/languages-6-FFCB05)
 [![Stars](https://img.shields.io/github/stars/DylanPDao/TamaPoke?style=flat&logo=github&color=yellow)](https://github.com/DylanPDao/TamaPoke/stargazers)
@@ -223,8 +223,10 @@ brings ELECTIVIRE, MAGMORTAR and RHYPERIOR waiting on exactly the same thing.
 
 ### Your party
 - A **farewell** or a **release** doesn't end the relationship any more — the creature
-  **joins your party** (6 slots), keeping its species, nickname, shiny status, IVs,
+  **joins your party** (5 slots), keeping its species, nickname, shiny status, IVs,
   training and the level it reached. Frozen there: it no longer ages or trains.
+  Five, not six: together with the active creature that's a full team of 6 --
+  exactly the battle cap, so team-select never has to leave anyone out.
 - A **runaway does not join.** It's the one ending with a cost, and letting a
   neglected pet come back on the team would remove it. **Neither does an early
   retire** — see "Retiring a creature early" below.
@@ -339,16 +341,21 @@ evolution-only or legendary species, and never shiny. Its level is rolled near
 your own live pet's (`level ± 3`, clamped to 1–100): not gym-capped, since a
 wild fight is not part of the badge ladder.
 
-The battle menu gains a fourth option, **CAPTURE**, which throws a Pokeball.
-The catch chance depends on the wild creature's remaining HP:
+The battle menu gains a fourth option, **BAG**, which opens the Pokeball,
+Masterball and Potion -- see "Inventory & expeditions" below for where those
+come from. Choosing a ball throws it. The catch chance depends on the wild
+creature's remaining HP, and a Masterball adds a flat bonus on top:
 
-| Wild HP | Catch chance |
-|---|---|
-| Full | **15 %** |
-| Near fainting | **85 %** |
-| (linear in between) | `15 + 70 × (missing HP / max HP)` |
+| Wild HP | Catch chance (Pokeball) | Catch chance (Masterball) |
+|---|---|---|
+| Full | **15 %** | **50 %** |
+| Near fainting | **85 %** | **100 %** (capped) |
+| (linear in between) | `15 + 70 × (missing HP / max HP)` | `+35`, capped at 100 |
 
-A miss usually just costs the turn -- the wild creature gets to act, same as
+A Masterball **raises** the odds; it is not the mainline games' guaranteed
+catch. Throwing either ball spends one from your inventory immediately, win or
+lose -- with none of either left, both rows in the bag grey out. A miss
+usually just costs the turn -- the wild creature gets to act, same as
 switching -- but there is also a flat **20 %** chance (`CAPTURE_FLEE_PCT`) on
 a miss that it flees outright instead, ending the fight for good. Both are
 decided the instant the ball is thrown, not when the animation finishes.
@@ -358,6 +365,44 @@ there is room, else the **box**, else you are dropped into the same
 Its IVs roll the same 8–31 spread (no care-streak bonus, and no legendary
 guarantee — wild encounters are always common) a freshly hatched egg would.
 It is also registered in the **Pokedex** the moment it is banked.
+
+### Inventory & expeditions
+
+The menu's third page holds **INVENTORY** (a read-only list of what you're
+carrying) and **EXPEDITION** (send the active pet off to gather more). A new
+save starts with **5 Pokeballs**, 0 Masterballs and 0 Potions -- an existing
+save loading this for the first time gets the same courtesy 5, so an update
+never leaves an established player unable to capture anything until their
+first trip back.
+
+An expedition takes the active pet away for a fixed duration; while it's
+gone, feeding/playing/bathing/training and every minigame that touches it are
+blocked (there's no pet on screen to do them to), but its hunger, energy,
+hygiene and joy keep draining exactly as they would during any other stretch
+without interaction -- an expedition is not a pause. A banked squad member can
+still fight in your place while the active one is away. Longer trips bring
+back more items, drawn from the same three-item table regardless of length:
+
+| Duration | Items brought back | Potion | Pokeball | Masterball |
+|---|---|---|---|---|
+| 15 min | 2 | 65 % | 30 % | 5 % |
+| 30 min | 4 | 65 % | 30 % | 5 % |
+| 1 hour | 7 | 65 % | 30 % | 5 % |
+
+A **Potion**, used from the battle bag, heals a fixed **40 HP** on whichever
+creature is currently on the field -- not a percentage, and it does nothing
+outside a fight (HP itself is never carried between battles; see the battle
+section below). Using it spends the turn, same as switching or a failed
+capture: the opponent still gets to act.
+
+Winning any trainer or wild fight also trains **every squad member that took
+at least one turn**, not just the active pet -- a banked member who fought
+gets the same random ATK/DEF/SPE bump (still capped by its own IVs, same as
+the active pet's), and there's a flat **30 %** chance of an extra item on top
+(`BTL_LOOT_PCT`, same three-item table as an expedition). A link (LAN) battle
+grants neither: the squad it fights with is rebuilt from what was already
+shipped to the peer, with no safe way back to a party slot index, so it keeps
+its older behaviour of no reward at all.
 
 ### Retiring a creature early
 
@@ -714,7 +759,7 @@ beach, forest, volcano, mountain, snow). Sleeping forces night.
 
 - `TamaPoke.ino` — init, game loop, render of every screen, gestures, serial console, audio
 - `pet.h` / `pet.cpp` — pet state and logic (stats, evolution, life cycle, streak/bond/medals, NVS)
-- `party.h` / `party.cpp` — the 6 retired pets kept from farewells and releases
+- `party.h` / `party.cpp` — the 5 retired pets kept from farewells and releases
 - `sdmon.h` / `sdmon.cpp` — TPK1 (animated) and TPK2 (PMD) sprites + thumbnails, and file reception over USB (PUT/LS)
 - `rtcbat.h` / `rtcbat.cpp` — PCF85063 RTC + AXP2101 PMU (battery, brightness, PWR button)
 - `audio.h` / `audio.cpp` — ES8311 + I2S + Game-Boy-style tone synth (non-blocking task)

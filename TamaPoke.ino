@@ -54,7 +54,7 @@
 
 // Version del firmware. Subir este numero en cada release (y manifest.json para
 // el instalador web). Se muestra en la pantalla de ajustes y por serie al arrancar.
-#define FW_VERSION "3.19"
+#define FW_VERSION "3.21"
 
 #if defined(TAMAPOKE_DISPLAY_QSPI_AMOLED)
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -317,7 +317,7 @@ bool menuOpen = false;
 // WILD. Slot 4 (the last row) is CLOSE on every page, at the same Y position,
 // so its hit-box never moves regardless of which page is showing.
 uint8_t menuPage = 0;
-#define MENU_PAGES 2
+#define MENU_PAGES 3
 #define MENU_X 73
 // Four rows: PARTY and GYMS came out, since a swipe right and a swipe left now
 // reach them directly. Sized to the bezel -- the panel is 320 wide, so 160 from
@@ -461,6 +461,12 @@ void drawConfirmPanel(const char *q, const char *sub1, const char *sub2,
 // capture animation ~250 lines above renderCapture()'s.
 static void btlFinishCapture();
 void renderCapture();
+// Same reason again: used in the tap/render dispatch chains ~4300 lines above
+// where the inventory/expedition screens are actually defined.
+void renderInventory();
+void inventoryTap(int16_t x, int16_t y);
+void renderExpedition();
+void expeditionTap(int16_t x, int16_t y);
 const char *const SCREEN_NAME[SCR_COUNT] = {
   "starter", "region", "gallery", "dexpick", "movepick", "box",
   "party", "keyboard", "card", "player", "clock", "gym", "gympick",
@@ -550,6 +556,13 @@ char rsvpWord[24] = "";      // the word on screen right now
 uint32_t rsvpNextAt = 0;
 bool rsvpPaused = false;
 bool rsvpDone = false;       // reached the end of the book
+
+// Inventory: a passive list, no state of its own beyond the flag.
+bool inventoryOpen = false;
+
+// Expedition picker/status. bagPage-style: just a flag, the countdown and
+// loot summary read straight off pet.expeditionKind/expeditionLoot.
+bool expeditionOpen = false;
 
 bool gymOpen = false;
 bool gymHard = false;   // which ladder the list is showing
@@ -674,6 +687,15 @@ bool gShowAllAvatars = false;  // emulator screenshot aid, never set on hardware
 bool btlPetIn = false;       // was the live pet in the squad?
 uint8_t btlTrainGain = 0;    // what the win trained, for the win screen
 uint8_t btlTrainWhich = 0;
+uint8_t btlOthersTrained = 0;  // how many OTHER squad members also gained training
+// bit i = squad slot i took at least one turn on the field. Rewards on a win
+// go only to whoever actually fought, not whoever merely sat in reserve.
+uint8_t btlParticipated = 0;
+// Squad slot -> party.slots[] index, filled by buildSquad(); -1 for the live
+// pet's slot (index 0 when btlPetIn). NOT valid for a link battle -- see
+// startLinkBattle(), which builds btlSquad[] from lan.mine[] instead and
+// never populates this, so squad-wide training stays trainer/wild-only.
+int8_t btlSquadPartyIdx[TRAINER_TEAM_MAX];
 bool btlLink = false;      // this fight is against another device
 bool btlLinkHost = false;
 bool btlWild = false;      // this fight is a wild encounter (offers CAPTURE)
@@ -762,6 +784,11 @@ bool btlCaptureWon = false;
 bool btlFoeFled = false;
 #define CAPTURE_FLEE_PCT 20
 #define BALL_ANIM_MS 1800
+// A win has a CHANCE of loot, not a guarantee -- see rollLootItem() for which
+// item. Trainer and wild wins only; a link win grants none, same as training.
+#define BTL_LOOT_PCT 30
+bool btlHasLoot = false;
+uint8_t btlLootWon = 0;   // ITEM_* from the last win, valid only if btlHasLoot
 // battle menu: 0 = FIGHT/POKEMON, 1 = the moves, 2 = the switch list
 uint8_t btlMenu = 0;
 #define BTL_LUNGE_MS 260
@@ -1599,10 +1626,10 @@ void handleSerial() {
                   btlPmd[0].loaded ? 1 : 0, btlPmd[1].loaded ? 1 : 0);
     Serial.println("DONE");
   } else if (line == "STATS") {
-    Serial.printf("spec=%d nv=%u com=%u fel=%u ene=%u lim=%u desc=%u sd=%d mon=%d bat=%d usb=%d rtc=%u\n",
+    Serial.printf("spec=%d nv=%u com=%u fel=%u ene=%u lim=%u desc=%u sd=%d mon=%d bat=%d batmv=%u usb=%d rtc=%u\n",
                   pet.speciesId, pet.level(), pet.fullness, pet.joy, pet.energy,
                   pet.hygiene, pet.careMistakes, sdReady, mon.loaded,
-                  batPercent(), usbPresent(), rtcEpoch());
+                  batPercent(), (unsigned)batRawMv(), usbPresent(), rtcEpoch());
     Serial.printf("peso=%u fue=%u def=%u vel=%u vit=%u baya=%d\n",
                   pet.weight, pet.atkStat(), pet.defStat(), pet.speStat(),
                   pet.vitStat(), pet.berryKnown);
@@ -1729,6 +1756,8 @@ void onSwipeV(int dir) {
   if (berryOpen) { leaveBerry(); return; }
   if (quizOpen) { leaveQuiz(); return; }
   if (rsvpOpen) { leaveRsvp(); return; }
+  if (inventoryOpen) { inventoryOpen = false; return; }
+  if (expeditionOpen) { expeditionOpen = false; return; }
   if (galleryOpen) {
     if (galleryDetail) { galleryDetail = 0; galleryPmd.unload(); galleryDirty = true; return; }
     galleryRegion = (uint8_t)((galleryRegion + (dir > 0 ? 1 : GAL_REGIONS - 1)) % GAL_REGIONS);
@@ -1899,7 +1928,13 @@ void uiButtonHeights(int *out, int max, int *n) {
 // Asleep, the LIGHT is the only live icon -- it is what wakes the pet. Both the
 // draw path and the tap path ask THIS, so a greyed button can never still be
 // tappable and the greying can never point at the wrong icon.
-bool uiButtonDisabled(int i) { return pet.sleeping && i != BTN_LIGHT; }
+//
+// On an expedition ALL four are dead, LIGHT included: there is no pet on the
+// screen to put to bed or wake up.
+bool uiButtonDisabled(int i) {
+  if (pet.onExpedition()) return true;
+  return pet.sleeping && i != BTN_LIGHT;
+}
 
 int uiSleepButton(int *cx, int *cy) {
   if (cx) *cx = buttons[BTN_LIGHT].cx;
@@ -2136,6 +2171,8 @@ void onSwipe(int dir) {
   if (berryOpen) { leaveBerry(); return; }
   if (quizOpen) { leaveQuiz(); return; }
   if (rsvpOpen) { leaveRsvp(); return; }
+  if (inventoryOpen) { inventoryOpen = false; return; }
+  if (expeditionOpen) { expeditionOpen = false; return; }
   if (kbOpen || clockOpen) return;
   if (cardOpen) {  // dentro de la ficha: cambiar entre las 4 paginas
     int p = (int)cardPage + (dir > 0 ? -1 : 1);  // izquierda avanza
@@ -2338,7 +2375,7 @@ void onTap(int16_t x, int16_t y) {
         menuOpen = false;
         choiceKind = 3; choiceUntil = millis() + 12000;
       } else if (menuPage == 1 && i == 1) {   // QUIZ
-        if (pet.isEgg() || pet.sleeping || pet.ceremony != CER_NONE) { sfxPlay(SFX_DENY); return; }
+        if (!pet.canInteractNow()) { sfxPlay(SFX_DENY); return; }
         sfxPlay(SFX_TAP);
         menuOpen = false;
         startQuiz();
@@ -2346,8 +2383,16 @@ void onTap(int16_t x, int16_t y) {
         sfxPlay(SFX_TAP);
         menuOpen = false;
         startRsvp();
+      } else if (menuPage == 2 && i == 0) {   // INVENTORY
+        sfxPlay(SFX_TAP);
+        menuOpen = false;
+        inventoryOpen = true;
+      } else if (menuPage == 2 && i == 1) {   // EXPEDITION
+        sfxPlay(SFX_TAP);
+        menuOpen = false;
+        expeditionOpen = true;
       }
-      // any other slot on page 1 is empty: no-op, the menu stays open
+      // any other slot on this page is empty: no-op, the menu stays open
       return;
     }
     return;
@@ -2438,6 +2483,14 @@ void onTap(int16_t x, int16_t y) {
   }
   if (rsvpOpen) {
     rsvpTap(x, y);
+    return;
+  }
+  if (inventoryOpen) {
+    inventoryTap(x, y);
+    return;
+  }
+  if (expeditionOpen) {
+    expeditionTap(x, y);
     return;
   }
   if (gameOpen) {
@@ -2755,7 +2808,8 @@ uint8_t uiCurrentScreen() {
   if (lanOpen) return SCR_LAN;
   if (gymOpen) return gymPick ? SCR_GYMPICK : SCR_GYM;
   if (pet.hasLearnOffer()) return SCR_LEARN;
-  if (gameOpen || sackOpen || spdOpen || berryOpen || quizOpen || rsvpOpen) return SCR_GAME;
+  if (gameOpen || sackOpen || spdOpen || berryOpen || quizOpen || rsvpOpen ||
+      inventoryOpen || expeditionOpen) return SCR_GAME;
   if (trainOpen) return SCR_TRAIN;
   if (menuOpen) return SCR_MENU;
   return SCR_MAIN;
@@ -2846,6 +2900,14 @@ void render() {
   }
   if (rsvpOpen) {
     renderRsvp();
+    return;
+  }
+  if (inventoryOpen) {
+    renderInventory();
+    return;
+  }
+  if (expeditionOpen) {
+    renderExpedition();
     return;
   }
   if (trainOpen) {
@@ -3029,7 +3091,7 @@ void render() {
 // ---------- minijuego: toques con la pokeball ----------
 
 void startGame() {
-  if (pet.isEgg() || pet.sleeping || pet.ceremony) return;
+  if (!pet.canInteractNow()) return;
   gameOpen = true;
   gameOverUntil = 0;
   gameUntil = millis() + GAME_MS;
@@ -3146,7 +3208,7 @@ void stepGame() {
 // ---------- saco de entrenamiento (entrena la fuerza) ----------
 
 void startSack() {
-  if (pet.isEgg() || pet.sleeping || pet.ceremony) return;
+  if (!pet.canInteractNow()) return;
   sackOpen = true;
   sackUntil = millis() + 10000;
   sackOverUntil = 0;
@@ -4015,21 +4077,26 @@ static void buildSquad(uint8_t maxLvl, uint8_t maxCount, uint16_t mask) {
   btlSquadN = 0;
   btlSquadAt = 0;
   btlPetIn = false;
+  btlParticipated = 0;
   if (maxCount > TRAINER_TEAM_MAX) maxCount = TRAINER_TEAM_MAX;
-  if (!pet.isEgg() && btlSquadN < maxCount && (mask & 1)) {
+  if (!pet.isEgg() && !pet.onExpedition() && btlSquadN < maxCount && (mask & 1)) {
     Pet tmp = pet;                       // a copy: the real pet is untouched
     if (maxLvl && tmp.level() > maxLvl)
       tmp.ageMinutes = (uint32_t)(maxLvl - 1) * MINUTES_PER_LEVEL;
-    combatantFromPet(btlSquad[btlSquadN++], tmp);
+    combatantFromPet(btlSquad[btlSquadN], tmp);
+    btlSquadPartyIdx[btlSquadN] = -1;   // the live pet, not a party slot
+    btlSquadN++;
     btlPetIn = true;      // the training reward goes to whoever fought for it
   }
   for (int i = 0; i < PARTY_SLOTS && btlSquadN < maxCount; i++) {
     if (party.slots[i].empty() || !(mask & (1 << (i + 1)))) continue;
     PartyMon m = party.slots[i];
     if (maxLvl && m.level > maxLvl) m.level = maxLvl;
-    combatantFromParty(btlSquad[btlSquadN++], m);
+    combatantFromParty(btlSquad[btlSquadN], m);
+    btlSquadPartyIdx[btlSquadN] = (int8_t)i;
+    btlSquadN++;
   }
-  if (btlSquadN) btlYou = btlSquad[0];
+  if (btlSquadN) { btlYou = btlSquad[0]; btlParticipated = 1; }  // slot 0 starts on the field
 }
 
 // How many you may bring: the leader's own count in hard mode, six otherwise.
@@ -4342,15 +4409,41 @@ static void btlResolve(uint8_t yourMove) {
       btlNewBadge = true;
     }
     // A badge and nothing else made the ladder a one-way checklist. A win now
-    // trains the creature that fought for it -- so a leader you can already
-    // beat is worth returning to. It goes to the LIVE pet only: banked members
-    // are frozen at the level and training they were banked with, and battling
-    // already costs the live pet energy, which is what rate-limits the grind
-    // without needing a cooldown.
-    if (btlWon && btlTrainer >= 0 && btlPetIn) {
-      // Later leaders are worth more, and hard mode is worth roughly double.
-      uint8_t amt = (btlHard ? 6 + random(5) : 3 + random(3)) + btlTrainer / 3;
-      btlTrainGain = pet.rewardTraining(amt, btlTrainWhich);
+    // trains EVERY squad member who actually fought (btlParticipated), not
+    // just the live pet -- battling already costs the live pet energy, which
+    // is what rate-limits the grind without needing a cooldown, and a banked
+    // member's turn on the field is exactly as real. Link wins are excluded:
+    // there is no safe party-slot mapping for a squad rebuilt from lan.mine[]
+    // (see btlSquadPartyIdx), so a networked fight keeps its old behaviour
+    // (no training reward) rather than risk crediting the wrong banked member.
+    btlOthersTrained = 0;
+    btlHasLoot = false;
+    if (btlWon && !btlLink) {
+      // Wild fights are worth less than a gym leader; later leaders are worth
+      // more, and hard mode roughly doubles a trainer win -- the same curve
+      // as before this extended past btlTrainer >= 0.
+      uint8_t amt = btlTrainer >= 0 ? (btlHard ? 6 + random(5) : 3 + random(3)) + btlTrainer / 3
+                                     : 2 + random(3);
+      bool partyChanged = false;
+      for (uint8_t i = 0; i < btlSquadN; i++) {
+        if (!(btlParticipated & (uint8_t)(1 << i))) continue;
+        if (btlSquadPartyIdx[i] < 0) {
+          if (btlPetIn) btlTrainGain = pet.rewardTraining(amt, btlTrainWhich);
+        } else {
+          uint8_t which;
+          if (party.rewardTrainingAt((uint8_t)btlSquadPartyIdx[i], amt, which)) {
+            btlOthersTrained++;
+            partyChanged = true;
+          }
+        }
+      }
+      if (partyChanged) party.save();
+      // A win has a CHANCE of a bonus item, not one every time.
+      if (random(100) < BTL_LOOT_PCT) {
+        btlLootWon = rollLootItem();
+        pet.giveItem(btlLootWon);
+        btlHasLoot = true;
+      }
     }
     audioMusic(btlWon ? MUS_VICTORY : MUS_NONE);
     if (btlWon) sfxPlay(SFX_VICTORY);
@@ -4360,7 +4453,19 @@ static void btlResolve(uint8_t yourMove) {
     if (btlLink) { btlSay("%s", btlWon ? T(S_BTL_WIN) : T(S_BTL_LOSE)); return; }
     if (btlWon) {
       if (btlTrainer >= 0) { btlWinUntil = millis() + 60000; return; }
-      btlSay("%s", T(S_BTL_WIN));   // a one-off win: no badge screen, just say WIN
+      // A one-off (wild) win: no badge screen, so the training/loot lines
+      // that would sit on renderWin() are narrated here instead, queued the
+      // same way btlSay() already queues up to 4 lines.
+      btlSay("%s", T(S_BTL_WIN));
+      if (btlTrainGain) {
+        static const StrId NAMES[3] = { S_TR_ATK, S_TR_DEF, S_TR_SPE };
+        btlSay(T(S_WIN_TRAIN_FMT), T(NAMES[btlTrainWhich % 3]), btlTrainGain);
+      }
+      if (btlOthersTrained) btlSay(T(S_OTHERS_TRAINED_FMT), btlOthersTrained);
+      if (btlHasLoot) {
+        static const StrId ITEM_NAMES[3] = { S_POTION, S_POKEBALL, S_MASTERBALL };
+        btlSay(T(S_LOOT_WON_FMT), T(ITEM_NAMES[btlLootWon]));
+      }
       return;
     }
     btlSay("%s", T(S_BTL_LOSE));
@@ -4544,6 +4649,22 @@ void renderWin() {
     gfx->print(T(S_WIN_MAXED));
   }
 
+  // squad-wide reward: who else trained, and any bonus item -- both a chance,
+  // so both are skipped silently rather than printing an empty line
+  gfx->setTextColor(UI_BAR_OK);
+  gfx->setTextSize(1);
+  if (btlOthersTrained) {
+    snprintf(l, sizeof(l), T(S_OTHERS_TRAINED_FMT), btlOthersTrained);
+    gfx->setCursor(CX - (int)strlen(l) * 3, 358);
+    gfx->print(l);
+  }
+  if (btlHasLoot) {
+    static const StrId ITEM_NAMES[3] = { S_POTION, S_POKEBALL, S_MASTERBALL };
+    snprintf(l, sizeof(l), T(S_LOOT_WON_FMT), T(ITEM_NAMES[btlLootWon]));
+    gfx->setCursor(CX - (int)strlen(l) * 3, 368);
+    gfx->print(l);
+  }
+
   gfx->setTextColor(UI_TRACK);
   gfx->setTextSize(2);
   gfx->setCursor(CX - strlen(T(S_BACK)) * 6, 380);
@@ -4592,11 +4713,13 @@ void renderBattle() {
     gfx->setTextColor(UI_TRACK);
     gfx->setCursor(CX - 30, BTL_GRID_Y + 84);
     gfx->print("tap...");
-  } else if (btlMenu == 0 && btlWild) {
-    // Wild fights get a genuine 2x2 -- FIGHT/SWITCH/CAPTURE/RUN as four equal
-    // cells on the exact grid the move and switch screens already use, rather
-    // than inventing new pixel arithmetic for a 4th button.
-    const char *lbl[4] = { T(S_FIGHT), T(S_BTL_SWITCH), T(S_BTL_CAPTURE), T(S_BTL_RUN) };
+  } else if (btlMenu == 0 && !btlLink) {
+    // Wild and trainer fights share this 2x2 now that both can open a bag
+    // (wild's for balls+potion, trainer's for the potion alone) -- one grid
+    // rather than a wild-only special case and a separate wide-FIGHT layout,
+    // now that there are two things that can occupy the spare cell instead
+    // of the one (capture) that used to justify keeping them apart.
+    const char *lbl[4] = { T(S_FIGHT), T(S_BTL_SWITCH), T(S_BAG), T(S_BTL_RUN) };
     for (int i = 0; i < 4; i++) {
       int x = BTL_CELL_X(i), y = BTL_CELL_Y(i);
       gfx->fillRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, i == 0 ? UI_BG_DAY : UI_TRACK);
@@ -4607,10 +4730,13 @@ void renderBattle() {
       gfx->print(lbl[i]);
     }
   } else if (btlMenu == 0) {
-    // FIGHT across the top, then POKEMON and RUN side by side. Three full-width
-    // rows do not fit: the panel is round, and at that depth the chord is only
-    // ~250 px. The lower two reuse the move grid's cells, so they inherit its
-    // padded hit areas -- which is what made POKEMON hard to press before.
+    // LINK ONLY from here: FIGHT across the top, then POKEMON and RUN side by
+    // side. No BAG -- the link protocol has no wire message for item use (see
+    // link.h), so it stays off the table for a networked fight. Three
+    // full-width rows do not fit: the panel is round, and at that depth the
+    // chord is only ~250 px. The lower two reuse the move grid's cells, so
+    // they inherit its padded hit areas -- which is what made POKEMON hard to
+    // press before.
     gfx->fillRoundRect(BTL_GRID_X, BTL_GRID_Y, 328, BTL_CELL_H, 10, UI_BG_DAY);
     gfx->drawRoundRect(BTL_GRID_X, BTL_GRID_Y, 328, BTL_CELL_H, 10, UI_INK);
     gfx->setTextColor(UI_INK);
@@ -4626,6 +4752,36 @@ void renderBattle() {
       gfx->setTextSize(2);
       gfx->setCursor(x + (BTL_CELL_W - (int)strlen(low[i]) * 12) / 2, y + 14);
       gfx->print(low[i]);
+    }
+  } else if (btlMenu == 3) {
+    // The bag: wild offers both balls plus the Potion; a trainer fight only
+    // ever offers the Potion, since capturing a trainer's own Pokemon makes
+    // no sense (already the rule before BAG existed -- CAPTURE never showed
+    // up on a trainer's menu either). A zero count greys the row rather than
+    // hiding it, same as the passive DEF row on the training submenu: show
+    // what is allowed, not a gap where something used to be.
+    drawBtlBack();
+    const char *lbl[4] = { nullptr, nullptr, nullptr, nullptr };
+    uint8_t cnt[4] = { 0, 0, 0, 0 };
+    if (btlWild) {
+      lbl[0] = T(S_POKEBALL);   cnt[0] = pet.pokeballs;
+      lbl[1] = T(S_MASTERBALL); cnt[1] = pet.masterballs;
+      lbl[2] = T(S_POTION);     cnt[2] = pet.potions;
+    } else {
+      lbl[0] = T(S_POTION); cnt[0] = pet.potions;
+    }
+    for (int i = 0; i < 4; i++) {
+      int x = BTL_CELL_X(i), y = BTL_CELL_Y(i);
+      bool usable = lbl[i] && cnt[i] > 0;
+      gfx->fillRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, usable ? UI_BG_DAY : UI_TRACK);
+      gfx->drawRoundRect(x, y, BTL_CELL_W, BTL_CELL_H, 10, usable ? UI_INK : 0x8410);
+      if (!lbl[i]) continue;
+      char l[24];
+      snprintf(l, sizeof(l), T(S_ITEM_COUNT_FMT), lbl[i], (unsigned)cnt[i]);
+      gfx->setTextColor(usable ? UI_INK : 0x8410);
+      gfx->setTextSize(1);
+      gfx->setCursor(x + (BTL_CELL_W - (int)strlen(l) * 6) / 2, y + BTL_CELL_H / 2 - 4);
+      gfx->print(l);
     }
   } else if (btlMenu == 2) {
     drawBtlBack();
@@ -4722,6 +4878,7 @@ static void btlDoSwap() {
   } else if (btlSwapWho == 0) {
     btlSquad[btlSquadAt] = btlYou;     // remember how battered it was
     btlSquadAt++;
+    btlParticipated |= (uint8_t)(1 << btlSquadAt);
     btlYou = btlSquad[btlSquadAt];
     btlHpShown[0] = btlYou.hp;
     btlSyncSprite(0, btlYou);
@@ -4738,6 +4895,7 @@ static void btlSwitchTo(uint8_t i) {
   if (i >= btlSquadN || i == btlSquadAt) return;
   btlSquad[btlSquadAt] = btlYou;
   btlSquadAt = i;
+  btlParticipated |= (uint8_t)(1 << i);
   btlYou = btlSquad[i];
   btlHpShown[0] = btlYou.hp;
   btlSyncSprite(0, btlYou);
@@ -4787,12 +4945,26 @@ static void btlRun() {
 
 // Throws the ball. The outcome is decided right here, up front, from the
 // foe's HP at this instant -- the animation only dramatizes an already-rolled
-// result, it does not change it.
-static void btlStartCapture() {
+// result, it does not change it. The ball itself is already spent by the
+// caller (the bag tap handler) before this runs, win or lose.
+static void btlStartCapture(bool masterBall) {
   sfxPlay(SFX_TAP);
-  btlCaptureWon = (uint8_t)random(100) < captureChancePct(btlFoe);
+  btlCaptureWon = (uint8_t)random(100) < captureChancePct(btlFoe, masterBall);
   btlFoeFled = !btlCaptureWon && (uint8_t)random(100) < CAPTURE_FLEE_PCT;
   btlBallUntil = millis() + BALL_ANIM_MS;
+}
+
+// A Potion: fixed +40 HP on whoever is currently on the field, narrated the
+// same way a move's own heal would be, and it costs the turn -- the same
+// "move 0 = no attack" idiom btlSwitchTo() and a failed capture already use,
+// so the foe still gets to act.
+#define POTION_HEAL_HP 40
+static void btlUsePotion() {
+  sfxPlay(SFX_TAP);
+  btlMenu = 0;
+  battleHeal(btlYou, POTION_HEAL_HP);
+  btlSay(T(S_BTL_USED), btlYou.name, T(S_POTION));
+  btlResolve(0);
 }
 
 // Resolution, called once from the main loop when the ball animation window
@@ -4936,14 +5108,14 @@ void battleTap(int16_t x, int16_t y) {
     if (btlSwapWho >= 0) btlDoSwap();   // the replacement arrives on this beat
     return;
   }
-  if (btlMenu == 0 && btlWild) {
+  if (btlMenu == 0 && !btlLink) {
     if (btlCellHit(0, x, y)) { sfxPlay(SFX_TAP); btlMenu = 1; return; }   // FIGHT
     if (btlCellHit(1, x, y)) { sfxPlay(SFX_TAP); btlMenu = 2; btlSwitchPage = 0; return; }  // SWITCH
-    if (btlCellHit(2, x, y)) { btlStartCapture(); return; }               // CAPTURE
+    if (btlCellHit(2, x, y)) { sfxPlay(SFX_TAP); btlMenu = 3; return; }   // BAG
     if (btlCellHit(3, x, y)) { btlRun(); return; }                        // RUN
     return;
   }
-  if (btlMenu == 0) {
+  if (btlMenu == 0) {   // LINK only, from here on -- no BAG, see the render side
     if (x >= BTL_GRID_X - BTL_HIT_PAD && x <= BTL_GRID_X + 328 + BTL_HIT_PAD &&
         y >= BTL_HIT_Y0(0) && y <= BTL_HIT_Y1(0)) {
       sfxPlay(SFX_TAP);
@@ -4953,6 +5125,23 @@ void battleTap(int16_t x, int16_t y) {
     if (btlCellHit(2, x, y)) { sfxPlay(SFX_TAP); btlMenu = 2; btlSwitchPage = 0; return; }
     if (btlCellHit(3, x, y)) { btlRun(); return; }
     return;
+  }
+  if (btlMenu == 3) {
+    if (btlBackTap(x, y)) return;
+    if (btlWild) {
+      if (btlCellHit(0, x, y) && pet.pokeballs > 0) {
+        pet.pokeballs--; pet.saveNow(); btlStartCapture(false); return;
+      }
+      if (btlCellHit(1, x, y) && pet.masterballs > 0) {
+        pet.masterballs--; pet.saveNow(); btlStartCapture(true); return;
+      }
+      if (btlCellHit(2, x, y) && pet.potions > 0) {
+        pet.potions--; pet.saveNow(); btlUsePotion(); return;
+      }
+    } else if (btlCellHit(0, x, y) && pet.potions > 0) {
+      pet.potions--; pet.saveNow(); btlUsePotion(); return;
+    }
+    return;   // a tap on an empty/disabled row does nothing
   }
   if (btlMenu == 2) {
     if (btlBackTap(x, y)) return;
@@ -5170,7 +5359,7 @@ void spdSpawn() {
 }
 
 void startSpeedGame() {
-  if (pet.isEgg() || pet.sleeping || pet.ceremony) return;
+  if (!pet.canInteractNow()) return;
   spdOpen = true;
   spdUntil = millis() + SPD_MS;
   spdOverUntil = 0;
@@ -5288,7 +5477,7 @@ void berrySpawn() {
 }
 
 void startBerry() {
-  if (pet.isEgg() || pet.sleeping || pet.ceremony) return;
+  if (!pet.canInteractNow()) return;
   berryOpen = true;
   berryUntil = millis() + BERRY_MS;
   berryOverUntil = 0;
@@ -5440,7 +5629,7 @@ void quizSpawn() {
 }
 
 void startQuiz() {
-  if (pet.isEgg() || pet.sleeping || pet.ceremony) return;
+  if (!pet.canInteractNow()) return;
   quizOpen = true;
   quizUntil = millis() + QUIZ_MS;
   quizOverUntil = 0;
@@ -5781,7 +5970,7 @@ void renderRsvp() {
 
 // candidate n: 0 = the live pet, 1..PARTY_SLOTS = banked members
 bool pickExists(uint8_t n) {
-  if (n == 0) return !pet.isEgg();
+  if (n == 0) return !pet.isEgg() && !pet.onExpedition();
   return n <= PARTY_SLOTS && !party.slots[n - 1].empty();
 }
 uint8_t pickChosen() {
@@ -6570,12 +6759,19 @@ static void menuRowLabel(int i, char *out, size_t n) {
       case 2: snprintf(out, n, "%s", T(S_SETTINGS)); break;
       default: snprintf(out, n, "%s", T(S_WILD_BATTLE)); break;
     }
-  } else if (i == 0) {
-    snprintf(out, n, "%s", T(S_RETIRE));
-  } else if (i == 1) {
-    snprintf(out, n, "%s", T(S_QUIZ));
-  } else if (i == 2) {
-    snprintf(out, n, "%s", T(S_READ));
+  } else if (menuPage == 1) {
+    switch (i) {
+      case 0: snprintf(out, n, "%s", T(S_RETIRE)); break;
+      case 1: snprintf(out, n, "%s", T(S_QUIZ)); break;
+      case 2: snprintf(out, n, "%s", T(S_READ)); break;
+      default: out[0] = 0; break;
+    }
+  } else if (menuPage == 2) {
+    switch (i) {
+      case 0: snprintf(out, n, "%s", T(S_INVENTORY)); break;
+      case 1: snprintf(out, n, "%s", T(S_EXPEDITION)); break;
+      default: out[0] = 0; break;
+    }
   } else {
     out[0] = 0;
   }
@@ -6601,12 +6797,15 @@ void drawMenu() {
   for (int i = 0; i < MENU_ROWS; i++) {
     bool close = (i == MENU_ROWS - 1);
     if (menuPage == 1 && i > 2 && !close) continue;   // empty slot: nothing drawn
+    if (menuPage == 2 && i > 1 && !close) continue;   // empty slots: nothing drawn
     int y = MENU_ROW_Y(i);
     bool dead = close ? false :
                 (menuPage == 0 && i == 3 && (pet.isEgg() || pet.ceremony != CER_NONE)) ||
                 (menuPage == 1 && i == 0 && !pet.canRetireNow()) ||   // an egg or a companion
-                (menuPage == 1 && i == 1 &&
-                 (pet.isEgg() || pet.sleeping || pet.ceremony != CER_NONE));
+                (menuPage == 1 && i == 1 && !pet.canInteractNow()) ||
+                // EXPEDITION stays live while already away (to check the
+                // countdown); only greyed when a NEW trip could not start.
+                (menuPage == 2 && i == 1 && !pet.onExpedition() && !pet.canInteractNow());
     gfx->fillRoundRect(MENU_X + 18, y, MENU_W - 36, MENU_ROW_H, 12,
                        close || dead ? UI_TRACK : UI_BG_DAY);
     gfx->drawRoundRect(MENU_X + 18, y, MENU_W - 36, MENU_ROW_H, 12, UI_INK);
@@ -6680,6 +6879,131 @@ void renderTrain() {
   gfx->setCursor(CX - (int)strlen(hint) * 3, TRAIN_Y + TRAIN_H - 22);
   gfx->print(hint);
   gfx->flush();   // without this the panel never updates and the screen freezes
+}
+
+// ---------- inventory ----------
+// Display-only: reuses the training submenu's panel geometry (TRAIN_X/Y/W/H)
+// since it is the same shape -- a modal panel with a title and a few rows,
+// closed by tapping outside it. Nothing inside is tappable.
+void renderInventory() {
+  for (int y = 0; y < 466; y += 2)
+    gfx->drawFastHLine(0, y, 466, gNight ? 0x0000 : 0x2104);
+
+  gfx->fillRoundRect(TRAIN_X, TRAIN_Y, TRAIN_W, TRAIN_H, 18, UI_WHITE);
+  gfx->drawRoundRect(TRAIN_X, TRAIN_Y, TRAIN_W, TRAIN_H, 18, UI_INK);
+
+  gfx->setTextColor(UI_INK);
+  gfx->setTextSize(2);
+  gfx->setCursor(CX - (int)strlen(T(S_INVENTORY)) * 6, TRAIN_Y + 20);
+  gfx->print(T(S_INVENTORY));
+
+  const char *names[3] = { T(S_POKEBALL), T(S_MASTERBALL), T(S_POTION) };
+  uint8_t counts[3] = { pet.pokeballs, pet.masterballs, pet.potions };
+  for (int i = 0; i < 3; i++) {
+    int y = TRAIN_ROW_Y(i);
+    gfx->fillRoundRect(TRAIN_X + 18, y, TRAIN_W - 36, TRAIN_ROW_H, 12, UI_BG_DAY);
+    gfx->drawRoundRect(TRAIN_X + 18, y, TRAIN_W - 36, TRAIN_ROW_H, 12, UI_INK);
+    char l[24];
+    snprintf(l, sizeof(l), T(S_ITEM_COUNT_FMT), names[i], (unsigned)counts[i]);
+    gfx->setTextColor(UI_INK);
+    gfx->setTextSize(2);
+    gfx->setCursor(TRAIN_X + 32, y + TRAIN_ROW_H / 2 - 8);
+    gfx->print(l);
+  }
+  gfx->flush();
+}
+
+void inventoryTap(int16_t x, int16_t y) {
+  bool inPanel = (x >= TRAIN_X && x <= TRAIN_X + TRAIN_W &&
+                  y >= TRAIN_Y && y <= TRAIN_Y + TRAIN_H);
+  if (!inPanel) { inventoryOpen = false; return; }   // tap outside = back to the pet
+  // display-only: nothing inside the panel responds to a tap
+}
+
+// ---------- expedition ----------
+#define EXPED_BTN_H 56
+#define EXPED_BTN_GAP 10
+#define EXPED_BTN_Y(i) (TRAIN_Y + 74 + (i) * (EXPED_BTN_H + EXPED_BTN_GAP))
+
+void renderExpedition() {
+  for (int y = 0; y < 466; y += 2)
+    gfx->drawFastHLine(0, y, 466, gNight ? 0x0000 : 0x2104);
+
+  gfx->fillRoundRect(TRAIN_X, TRAIN_Y, TRAIN_W, TRAIN_H, 18, UI_WHITE);
+  gfx->drawRoundRect(TRAIN_X, TRAIN_Y, TRAIN_W, TRAIN_H, 18, UI_INK);
+
+  gfx->setTextColor(UI_INK);
+  gfx->setTextSize(2);
+  gfx->setCursor(CX - (int)strlen(T(S_EXPEDITION)) * 6, TRAIN_Y + 20);
+  gfx->print(T(S_EXPEDITION));
+
+  if (pet.onExpedition()) {
+    char l[24];
+    uint32_t secs = pet.expeditionSecondsLeft();
+    snprintf(l, sizeof(l), T(S_EXP_AWAY_FMT), (unsigned)((secs + 59) / 60));
+    gfx->setCursor(CX - (int)strlen(l) * 6, TRAIN_Y + TRAIN_H / 2 - 8);
+    gfx->print(l);
+    gfx->flush();
+    return;
+  }
+
+  // Shown once, the first time this screen opens after resolveExpedition()
+  // fires -- cleared by the next tap inside the panel (see expeditionTap()).
+  if (pet.expeditionJustReturned) {
+    gfx->setTextColor(UI_BAR_OK);
+    gfx->setCursor(CX - (int)strlen(T(S_EXP_WELCOME)) * 6, TRAIN_Y + 50);
+    gfx->print(T(S_EXP_WELCOME));
+    const char *names[3] = { T(S_POTION), T(S_POKEBALL), T(S_MASTERBALL) };
+    gfx->setTextColor(UI_INK);
+    gfx->setTextSize(1);
+    int ly = TRAIN_Y + 90;
+    for (int i = 0; i < 3; i++) {
+      if (!pet.expeditionLoot[i]) continue;
+      char l[24];
+      snprintf(l, sizeof(l), T(S_ITEM_COUNT_FMT), names[i], (unsigned)pet.expeditionLoot[i]);
+      gfx->setCursor(CX - (int)strlen(l) * 3, ly);
+      gfx->print(l);
+      ly += 20;
+    }
+    gfx->flush();
+    return;
+  }
+
+  bool can = pet.canStartExpedition();
+  const char *lbl[3] = { T(S_EXP_15), T(S_EXP_30), T(S_EXP_60) };
+  for (int i = 0; i < 3; i++) {
+    int y = EXPED_BTN_Y(i);
+    gfx->fillRoundRect(TRAIN_X + 18, y, TRAIN_W - 36, EXPED_BTN_H, 12,
+                       can ? UI_BG_DAY : UI_TRACK);
+    gfx->drawRoundRect(TRAIN_X + 18, y, TRAIN_W - 36, EXPED_BTN_H, 12, UI_INK);
+    gfx->setTextColor(can ? UI_INK : 0x8410);
+    gfx->setTextSize(2);
+    gfx->setCursor(CX - (int)strlen(lbl[i]) * 6, y + EXPED_BTN_H / 2 - 8);
+    gfx->print(lbl[i]);
+  }
+  gfx->flush();
+}
+
+void expeditionTap(int16_t x, int16_t y) {
+  bool inPanel = (x >= TRAIN_X && x <= TRAIN_X + TRAIN_W &&
+                  y >= TRAIN_Y && y <= TRAIN_Y + TRAIN_H);
+  if (!inPanel) { expeditionOpen = false; return; }   // tap outside = back to the pet
+  if (pet.onExpedition()) return;   // nothing to tap while away, just the countdown
+  if (pet.expeditionJustReturned) {
+    sfxPlay(SFX_TAP);
+    pet.expeditionJustReturned = false;   // the welcome summary is shown once
+    return;
+  }
+  if (!pet.canStartExpedition()) return;
+  for (int i = 0; i < 3; i++) {
+    int by = EXPED_BTN_Y(i);
+    if (x < TRAIN_X + 18 || x > TRAIN_X + TRAIN_W - 18) continue;
+    if (y < by || y > by + EXPED_BTN_H) continue;
+    sfxPlay(SFX_TAP);
+    pet.startExpedition(i + 1);
+    expeditionOpen = false;
+    return;
+  }
 }
 
 // ---------- the box ----------
@@ -7447,7 +7771,7 @@ void drawPet() {
 // ---------- escena de bano ----------
 
 void startBath() {
-  if (pet.isEgg() || pet.sleeping || pet.ceremony || bathUntil) return;
+  if (!pet.canInteractNow() || bathUntil) return;
   bathUntil = millis() + 3000;
   bathPending = true;
   int cx = (int)beh.x;

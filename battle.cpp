@@ -122,6 +122,8 @@ static void heal(Combatant &c, uint16_t amount) {
   c.hp = v > c.maxHp ? c.maxHp : (uint16_t)v;
 }
 
+void battleHeal(Combatant &c, uint16_t amount) { heal(c, amount); }
+
 void battleAct(Combatant &atk, Combatant &def, uint8_t mv, TurnLog &log) {
   log = TurnLog();
   log.move = mv;
@@ -295,8 +297,11 @@ uint8_t aiChooseMove(const Combatant &self, const Combatant &foe, bool smart) {
   return best;
 }
 
-uint8_t captureChancePct(const Combatant &foe) {
-  if (!foe.maxHp) return CATCH_MIN_PCT;
-  return (uint8_t)(CATCH_MIN_PCT + (uint16_t)(CATCH_MAX_PCT - CATCH_MIN_PCT) *
-                   (foe.maxHp - foe.hp) / foe.maxHp);
+uint8_t captureChancePct(const Combatant &foe, bool masterBall) {
+  uint8_t base = !foe.maxHp ? CATCH_MIN_PCT
+    : (uint8_t)(CATCH_MIN_PCT + (uint16_t)(CATCH_MAX_PCT - CATCH_MIN_PCT) *
+                (foe.maxHp - foe.hp) / foe.maxHp);
+  if (!masterBall) return base;
+  uint16_t boosted = (uint16_t)base + CATCH_MASTER_BONUS_PCT;
+  return boosted > 100 ? 100 : (uint8_t)boosted;
 }

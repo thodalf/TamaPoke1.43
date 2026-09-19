@@ -21,7 +21,7 @@ Personal, non-commercial fan project. Code MIT; sprites CC BY-NC (PMD SpriteColl
 | `pet.cpp/.h` | Game state machine: stats, tick, evolution, eggs, save/load, balance constants |
 | `species.h` / `dex.h` | The 151: names, typings, evolution chains, base stats, rarity tiers, favourite berry |
 | `types.h` | Type-effectiveness helpers over the generated 18x18 chart in `dex.h` |
-| `party.cpp/.h` | The 6 retired pets banked by farewell/release (not runaway) |
+| `party.cpp/.h` | The 5 retired pets banked by farewell/release (not runaway) -- plus the active one, that's a team of 6 |
 | `i18n.cpp/.h` | 6-language string table (ES/EN/FR/DE/IT/PT) |
 | `audio.cpp/.h` | ES8311 codec over I2S (1.75 only; stub on the other two — no audio hardware on either) |
 | `rtcbat.cpp/.h` | PCF85063 RTC + AXP2101 battery/PMU/PWR button (PMU is 1.75-only; stub otherwise) |
@@ -321,6 +321,50 @@ What is left is the 24-48 h soak test on `HEALTH`.
 ## TODO
 
 Working state, so it survives a closed session. Tick items off as they land.
+
+### Done: an RPG layer (v3.21) -- inventory, expeditions, capture cost, squad-wide rewards
+
+Player-wide inventory (`pokeballs`/`masterballs`/`potions` on `Pet`, alongside
+`badges` -- outlives every creature, `newEgg()`/`adoptFrom()` never touch it).
+Per-creature expedition state (`expeditionKind`/`expeditionReturnEpoch`,
+alongside `sleeping` -- reset by `newEgg()`/`adoptFrom()` like it), resolved
+via `rtcEpoch()` from both `tick()` (foreground) and `syncClock()` (boot
+catch-up), the same epoch-deadline pattern as offline aging, never `millis()`.
+
+Extracted `Pet::canInteractNow()` (`!isEgg() && !sleeping && ceremony==CER_NONE
+&& !onExpedition()`) and replaced the `isEgg()||sleeping||ceremony` pattern
+that had been hand-copied into at least 11 places across `pet.cpp` and
+`TamaPoke.ino` (feed/play/caress/canEvolveNow, the six minigame starters, the
+QUIZ menu row) -- exactly the "rule enforced in one path but not its twin"
+trap this file already warns about. `uiButtonDisabled()` and `pickExists(0)`/
+`buildSquad()` (a SECOND independent copy of the live-pet-inclusion check)
+both gained the same `onExpedition()` condition by hand.
+
+Capture now costs a ball (`captureChancePct(foe, masterBall)`; Masterball adds
+`CATCH_MASTER_BONUS_PCT` 35, raising odds rather than guaranteeing the catch)
+and Potions heal a fixed 40 HP in battle. Both live behind a new BAG cell in
+the battle menu, which **unified** the wild and trainer top-menus into one
+2x2 (`{FIGHT,SWITCH,BAG,RUN}`) now that there are two things that can occupy
+the spare cell instead of the one (capture) that used to justify keeping them
+apart -- LAN battles keep the old wide-FIGHT layout, no BAG, since the link
+protocol (`link.h`) has no wire message for item use.
+
+Battle rewards: `Pet::rewardTraining()` now fires for every squad member that
+took a turn (`btlParticipated` bitmask, `btlSquadPartyIdx[]` mapping squad
+slot to `party.slots[]` index, both filled by `buildSquad()`), via a new
+`Party::rewardTrainingAt()` mirroring the same headroom/IV-cap logic -- a
+deliberate reversal of `PartyMon`'s "frozen, cannot train further" for banked
+members that actually fought. Trainer AND wild wins grant it now, not gym
+wins alone. **LAN excluded on purpose**: `startLinkBattle()` rebuilds
+`btlSquad[]` from `lan.mine[]`, never populates `btlSquadPartyIdx[]`, and
+there is no safe way to map a networked squad back to a party slot -- crediting
+the wrong banked member would be worse than the old "no reward" behaviour, so
+link wins keep exactly that. Wins also have a 30% chance of a bonus item
+(`BTL_LOOT_PCT`), same weighted table (`rollLootItem()`) an expedition uses.
+
+Menu gained a third page (`MENU_PAGES` 2->3): INVENTORY (read-only) and
+EXPEDITION (15/30/60 min picker + countdown + one-shot "welcome back" summary,
+`pet.expeditionJustReturned`).
 
 ### Done (branch `feat/battle-foundations`, pushed)
 

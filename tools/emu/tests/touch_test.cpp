@@ -382,9 +382,12 @@ int main(int argc, char **argv) {
   printf("PASS: hard mode keeps its own unlock order\n");
   gymHard = false; gymOpen = false; pet.badges = 0;
 
-  // ---- a live pet plus a FULL party is 7 candidates against a cap of 6. The
-  // 7th used to be counted but never drawn and never tappable, so FIGHT sat
-  // inert with no way to fix it.
+  // ---- a live pet plus a FULL party is exactly PARTY_SLOTS+1 candidates,
+  // which is by construction the easy-mode cap (squadCap==TRAINER_TEAM_MAX):
+  // PARTY_SLOTS was cut from 6 to 5 specifically so the whole roster always
+  // fits the battle cap with nothing to trim and nobody left off-page. Before
+  // that cut a full party (6) plus the live pet was 7 candidates against a
+  // cap of 6, spanning two pages just to leave one out -- see party.h.
   battleOpen = false; pickOpen = false;
   for (int i = 0; i < PARTY_SLOTS; i++) { PartyMon m; m.dex = 9 + i * 10; m.level = 40;
     m.ivAtk = m.ivDef = m.ivSpe = m.ivHp = 25; party.replaceAt(i, m); }
@@ -392,14 +395,16 @@ int main(int argc, char **argv) {
   pickDefault(squadCap(0, false));
   printf("     candidates=%u chosen=%u cap=%u\n",
          pickCandidates(), pickChosen(), squadCap(0, false));
-  if (pickCandidates() != PARTY_SLOTS + 1) { printf("FAIL: expected 7 candidates\n"); return 1; }
-  printf("PASS: a live pet plus a full party is 7 candidates\n");
-  if (pickChosen() > squadCap(0, false)) {
-    printf("FAIL: the picker opens over its own cap\n"); return 1; }
-  printf("PASS: it opens with a valid selection, not everything\n");
-  { uint8_t pages = (pickCandidates() + 6 - 1) / 6;
-    if (pages < 2) { printf("FAIL: 7 candidates must span 2 pages\n"); return 1; }
-    printf("PASS: the 7th is reachable on page %u of %u\n", pages, pages); }
+  if (pickCandidates() != PARTY_SLOTS + 1) { printf("FAIL: expected %u candidates\n", PARTY_SLOTS + 1); return 1; }
+  if (pickCandidates() != squadCap(0, false)) {
+    printf("FAIL: the whole roster should exactly match the easy-mode cap\n"); return 1; }
+  printf("PASS: a live pet plus a full party exactly fills the easy-mode team\n");
+  if (pickChosen() != pickCandidates()) {
+    printf("FAIL: with room for everyone, the picker should trim nobody\n"); return 1; }
+  printf("PASS: it opens with the whole roster selected, nothing trimmed\n");
+  { uint8_t pages = (pickCandidates() + PICK_PER_PAGE - 1) / PICK_PER_PAGE;
+    if (pages != 1) { printf("FAIL: the whole roster should fit on one page\n"); return 1; }
+    printf("PASS: the whole roster fits on a single page\n"); }
   for (int i = 0; i < PARTY_SLOTS; i++) party.releaseAt(i);
   squadMask = 0xFFFF;
 

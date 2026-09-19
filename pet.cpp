@@ -4,6 +4,7 @@
 #include "moves.h"
 #include "noart.h"   // speciesHasArt(): the egg pool skips what cannot be drawn
 #include "audio.h"
+#include "rtcbat.h"  // rtcEpoch(): expedition deadlines are epochs, like every other gameplay deadline that must survive a power-off
 
 // Reads a blob that may be LONGER than the array we are reading it into.
 //
@@ -89,6 +90,8 @@ void Pet::newEgg() {
   mistakeCooldown = 0;
   sleeping = false;
   frozen = false;
+  expeditionKind = 0;
+  expeditionReturnEpoch = 0;
   save();
 }
 
@@ -109,6 +112,11 @@ void Pet::syncClock(uint32_t nowEpoch) {
   uint32_t seen = prefs.getUInt("seen", 0);
   lastSeenEpoch = nowEpoch;
   if (nowEpoch == 0) return;
+  // Boot-time catch-up: the device was off through some or all of the trip.
+  // A direct epoch comparison, not the minute-loop below -- the loot count
+  // only depends on which duration was picked, not on simulating every
+  // minute in between.
+  if (expeditionKind && nowEpoch >= expeditionReturnEpoch) resolveExpedition();
   uint32_t mins = (seen && nowEpoch > seen) ? (nowEpoch - seen) / 60 : 0;
   if (mins < 2 || ceremony != CER_NONE || starterPick) {
     save();  // primera vez, sin tiempo que aplicar o aun eligiendo inicial
@@ -168,6 +176,12 @@ void Pet::tick() {
                             // los 3 min con la especie sorteada y se perderia la
                             // eleccion del jugador
   if (!frozen) ageMinutes++;   // a revived companion does not age
+
+  // Foreground case: the device stayed on through the whole trip. syncClock()
+  // covers the other case (it was off and rtcEpoch() jumped past the
+  // deadline at boot) -- same epoch comparison, two call sites because one
+  // runs every tick and the other only once, at startup.
+  if (expeditionKind && rtcEpoch() >= expeditionReturnEpoch) resolveExpedition();
 
   if (isEgg()) {
     if (ageMinutes >= 3) hatch();  // si no lo tocas, eclosiona solo a los 3 min
@@ -243,6 +257,50 @@ void Pet::tick() {
   if (++ticksSinceSave >= 5) pendingSave = true;
 }
 
+// Shared by an expedition's loot and a battle win's loot -- one weighted
+// table rather than two that could drift apart. Order matches ITEM_* in
+// pet.h: potion, then pokeball, then whatever's left over (masterball).
+uint8_t rollLootItem() {
+  int r = random(100);
+  if (r < EXPED_PCT_POTION) return ITEM_POTION;
+  if (r < EXPED_PCT_POTION + EXPED_PCT_POKEBALL) return ITEM_POKEBALL;
+  return ITEM_MASTERBALL;
+}
+
+void Pet::startExpedition(uint8_t kind) {
+  if (!canStartExpedition()) return;
+  uint32_t mins = kind == 1 ? EXPED_MIN_15 : kind == 2 ? EXPED_MIN_30 : EXPED_MIN_60;
+  expeditionKind = kind;
+  expeditionReturnEpoch = rtcEpoch() + mins * 60;
+  expeditionJustReturned = false;
+  save();
+}
+
+uint32_t Pet::expeditionSecondsLeft() const {
+  if (!expeditionKind) return 0;
+  uint32_t now = rtcEpoch();
+  return now >= expeditionReturnEpoch ? 0 : expeditionReturnEpoch - now;
+}
+
+// Rolls the trip's loot, credits it to the inventory, and clears the away
+// state. Called from both tick() (foreground) and syncClock() (boot
+// catch-up) -- see pet.h for why this lives behind a single function rather
+// than being inlined at each call site.
+void Pet::resolveExpedition() {
+  uint8_t rolls = expeditionKind == 1 ? EXPED_ITEMS_15
+                : expeditionKind == 2 ? EXPED_ITEMS_30 : EXPED_ITEMS_60;
+  expeditionLoot[0] = expeditionLoot[1] = expeditionLoot[2] = 0;
+  for (uint8_t i = 0; i < rolls; i++) {
+    uint8_t item = rollLootItem();
+    giveItem(item);
+    expeditionLoot[item]++;
+  }
+  expeditionKind = 0;
+  expeditionReturnEpoch = 0;
+  expeditionJustReturned = true;
+  save();
+}
+
 // Copies the creature into endedMon so it can be offered a party slot, since
 // newEgg() is about to wipe every field. Only the two endings the player CHOSE
 // qualify: a runaway ran off after an hour of total neglect, and letting it
@@ -266,6 +324,8 @@ void Pet::adoptFrom(const PartyMon &m, bool stayFrozen) {
   learnQCount = 0;
   medals = m.medals;
   sleeping = false;
+  expeditionKind = 0;
+  expeditionReturnEpoch = 0;
   bond = 0;
   bondToday = 0;
   berryKnown = false;
@@ -900,7 +960,7 @@ bool Pet::canRunawayNow() const {
 
 bool Pet::canRetireNow() const {
   if (frozen) return false;     // a companion is never given up
-  return !isEgg() && !sleeping && ceremony == CER_NONE && !starterPick;
+  return canInteractNow() && !starterPick;
 }
 
 // The ceremony is the same one; only the debt differs. Marked BEFORE the
@@ -986,7 +1046,7 @@ void Pet::hatch() {
 // usuario tocando al bicho (evolve()), para que vea la transformacion.
 bool Pet::canEvolveNow() const {
   if (frozen) return false;     // frozen at the form it was banked in
-  if (isEgg() || sleeping || ceremony != CER_NONE) return false;
+  if (!canInteractNow()) return false;
   const DexEntry &d = DEX_TBL[speciesId];
   if (d.evolvesTo == 0) return false;
   // evoPen is the day owed for retiring the PREVIOUS creature early. It rides
@@ -1030,8 +1090,7 @@ void Pet::feed() {
 }
 
 void Pet::feedBerry(uint8_t color) {
-  if (ceremony != CER_NONE) return;
-  if (isEgg() || sleeping) return;
+  if (!canInteractNow()) return;
   if (lovesBerry(color)) {
     fullness = clamp100(fullness + 35);
     joy = clamp100(joy + 10);
@@ -1047,8 +1106,7 @@ void Pet::feedBerry(uint8_t color) {
 }
 
 void Pet::feedCandy() {
-  if (ceremony != CER_NONE) return;
-  if (isEgg() || sleeping) return;
+  if (!canInteractNow()) return;
   fullness = clamp100(fullness + 10);
   joy = clamp100(joy + 12);
   weight = clamp100(weight + 12);  // las chuches pasan factura
@@ -1201,8 +1259,7 @@ uint8_t Pet::trainVitality(uint16_t hits) {
 }
 
 void Pet::play() {
-  if (ceremony != CER_NONE) return;
-  if (isEgg() || sleeping) return;
+  if (!canInteractNow()) return;
   joy = clamp100(joy + 25);
   energy = clamp100(energy - 10);
   fullness = clamp100(fullness - 5);
@@ -1275,7 +1332,7 @@ void Pet::toggleLight() {
 }
 
 void Pet::clean() {
-  if (ceremony != CER_NONE) return;
+  if (!canInteractNow()) return;
   poops = 0;
   hygiene = 100;
   addBond(1);
@@ -1284,8 +1341,7 @@ void Pet::clean() {
 }
 
 void Pet::caress() {
-  if (ceremony != CER_NONE) return;
-  if (isEgg() || sleeping) return;
+  if (!canInteractNow()) return;
   joy = clamp100(joy + 5);
   heartUntil = millis() + HEART_MS;
   addBond(1);
@@ -1368,6 +1424,11 @@ void Pet::save() {
   prefs.putUShort("vhi", vitHi);
   prefs.putUShort("whi", quizHi);
   prefs.putString("nick", nick);
+  prefs.putUChar("pkba", pokeballs);
+  prefs.putUChar("mstb", masterballs);
+  prefs.putUChar("pots", potions);
+  prefs.putUChar("expk", expeditionKind);
+  prefs.putUInt("expr", expeditionReturnEpoch);
 }
 
 void Pet::load() {
@@ -1464,6 +1525,15 @@ void Pet::load() {
   if (avatar >= AVATAR_COUNT) avatar = 0;   // a save from when there were four
   badges = prefs.getUShort("badg", 0);
   badgesHard = prefs.getUShort("badh", 0);
+  // 5 starter Pokeballs is a courtesy default: it applies equally to a
+  // brand-new save and to an existing one loading this key for the first
+  // time, so an update does not leave an established player unable to
+  // capture anything until their first expedition comes back.
+  pokeballs = prefs.getUChar("pkba", 5);
+  masterballs = prefs.getUChar("mstb", 0);
+  potions = prefs.getUChar("pots", 0);
+  expeditionKind = prefs.getUChar("expk", 0);
+  expeditionReturnEpoch = prefs.getUInt("expr", 0);
   if (!isEgg() && moveCount() == 0 && lastLearnLevel == 0) {
     // save from before moves existed: hand it the set it should already have
     // rather than a queue of every gate it ever passed

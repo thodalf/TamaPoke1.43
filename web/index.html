@@ -199,16 +199,36 @@ if (!supported) { document.getElementById('unsupported').style.display='block';
   document.getElementById('connect').disabled = true; }
 
 let port, reader, writer, lineBuf = '';
+let readerDone = false;
+
+// Pumps the serial port into lineBuf in the background, decoupled from any
+// particular readLine()'s timeout. Before this, readLine() awaited
+// reader.read() directly -- and Web Serial's read() only resolves on data or
+// on the stream closing, never on its own after a timeout. If the board never
+// answered a PUT (for whatever reason), that await just hung forever with no
+// error anywhere, which is exactly what "stuck on Sending, nothing happens"
+// looks like from the page. Now a stall becomes a real timeout instead of a
+// silent hang, whatever caused the board to go quiet.
+async function pumpReader() {
+  readerDone = false;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      lineBuf += new TextDecoder().decode(value);
+    }
+  } catch (e) { /* port closed/disconnected -- readLine's timeout takes over */ }
+  readerDone = true;
+}
 
 async function readLine(timeoutMs = 6000) {
   const deadline = Date.now() + timeoutMs;
   while (true) {
     const nl = lineBuf.indexOf('\n');
     if (nl >= 0) { const l = lineBuf.slice(0, nl).trim(); lineBuf = lineBuf.slice(nl + 1); return l; }
+    if (readerDone) return null;
     if (Date.now() > deadline) return null;
-    const { value, done } = await reader.read();
-    if (done) return null;
-    lineBuf += new TextDecoder().decode(value);
+    await new Promise((r) => setTimeout(r, 20));
   }
 }
 
@@ -272,6 +292,7 @@ document.getElementById('connect').onclick = async () => {
     reader = port.readable.getReader();
     writer = port.writable.getWriter();
     lineBuf = '';
+    pumpReader();   // not awaited: runs in the background for the whole session
     log('Connected. Press "Load sprites".');
     for (const b of document.querySelectorAll('[data-region]')) b.disabled = false;
     document.getElementById('files').disabled = false;
@@ -388,6 +409,7 @@ document.getElementById('connectBak').onclick = async () => {
       reader = port.readable.getReader();
       writer = port.writable.getWriter();
       lineBuf = '';
+      pumpReader();   // not awaited: same background pump as the main connect button
     }
     bakLog('Connected.');
     document.getElementById('saveBak').disabled = false;

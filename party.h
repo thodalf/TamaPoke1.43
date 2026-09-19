@@ -8,8 +8,16 @@
 // Only the two endings the player CHOOSES bank a pet -- farewell and release.
 // A runaway does not: it is the game's one punishing outcome, and letting a
 // neglected pet come back as a team member would take the sting out of it.
-#define PARTY_SLOTS 6
-// The box: storage beyond the six that fight. Deliberately a SEPARATE NVS key
+//
+// Five, not six: the live pet is the sixth. Before this the party screen
+// could hold 6 banked members alongside the live one -- 7 creatures owned at
+// once -- while a battle can only ever field 6 total (TRAINER_TEAM_MAX,
+// squadCap()). That mismatch forced the team-select picker to show 7
+// candidates against a cap of 6, spanning two pages just to leave one out.
+// Capping the bank at 5 makes "5 banked + the active one" the whole roster,
+// so it always fits the battle cap exactly and the picker never has to trim.
+#define PARTY_SLOTS 5
+// The box: storage beyond the ones that fight. Deliberately a SEPARATE NVS key
 // rather than a bigger party blob -- growing that blob would change its stride
 // and the length-based migration in begin() cannot tell a stride change from a
 // slot-count change, so an existing party would be read back misaligned. A new
@@ -75,6 +83,14 @@ public:
   // Swaps a party slot with a box slot. Either may be empty, so this doubles as
   // deposit and withdraw rather than needing three separate operations.
   void swapPartyBox(uint8_t partyIdx, uint8_t boxIdx);
+
+  // The Pet::rewardTraining() reward, extended to a banked squad member that
+  // fought and won. Same "only stats with headroom" rule and the same
+  // IV-bound ceiling (Pet::trMaxFor), applied to slots[idx] rather than the
+  // live pet -- a deliberate reversal of "frozen, cannot be trained further"
+  // above, not an oversight. Does not save(); callers batch a whole battle's
+  // rewards into ONE save() rather than one per member.
+  uint8_t rewardTrainingAt(uint8_t idx, uint8_t amount, uint8_t &which);
 
   // combat stats of a party member, same formula as the live pet's
   uint16_t atkOf(const PartyMon &m) const;

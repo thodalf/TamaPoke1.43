@@ -84,6 +84,7 @@ static void refreshPower() {
 int batPercent() { refreshPower(); return cachedPct; }
 bool batCharging() { refreshPower(); return cachedCharging; }
 bool usbPresent() { refreshPower(); return cachedUsb; }
+uint32_t batRawMv() { return 0; }  // read over I2C on this board, not an ADC pin
 
 void pwrSetup() {
   if (!pmuOk) return;
@@ -120,16 +121,19 @@ void pmuEnablePanel() {
 
 // Sin PMU no hay lectura de % por I2C, pero SI hay un divisor resistivo en
 // BAT_ADC (100K/200K, igual en el esquematico de la 1.43 y el de la 2.8"
-// redonda -- mismo diseno de referencia reutilizado). Se asume que el
-// resistor de 200K va a GND (relacion 2/3: 4.2V de bateria llena -> 2.8V en
-// el pin, aprovechando mejor el rango del ADC que la relacion 1/3 al reves,
-// que dejaria solo 1.4V) -- ESTO NO ESTA CONFIRMADO CON UN VOLTIMETRO, es la
-// orientacion mas probable segun el uso del ADC, no algo leido directo del
-// esquematico. Si el porcentaje mostrado no cuadra con una bateria real,
-// este es el primer numero a revisar (probar *3 en vez de *3/2).
+// redonda -- mismo diseno de referencia reutilizado).
+//
+// La primera version de esto asumia el resistor de 200K a GND (relacion 2/3,
+// *3/2) y fue confirmada MALA en placa real: un jugador vio "bateria vacia"
+// con una bateria en buen estado. Eso es justo la firma de una relacion
+// subestimada -- si el divisor real es al reves (100K a GND, 200K en serie
+// con la bateria, relacion 1/3), *3/2 calcula la mitad del voltaje real.
+// Cambiado a *3 (100K a GND). Sigue siendo una deduccion, no una medicion con
+// voltimetro -- si algun dia vuelve a leer mal, ese es el proximo numero a
+// revisar, en la direccion contraria esta vez.
 static int readBatPercent() {
   uint32_t mv = analogReadMilliVolts(BAT_ADC);
-  uint32_t battMv = mv * 3 / 2;
+  uint32_t battMv = mv * 3;
   // Curva LiPo aproximada (no lineal: la tension cae rapido al final). Sin
   // placa para calibrar contra un voltimetro real, es una aproximacion
   // razonable, no una medicion exacta.
@@ -151,6 +155,11 @@ static int readBatPercent() {
 int batPercent() { return readBatPercent(); }
 bool batCharging() { return false; }  // el STAT del cargador no llega a ningun GPIO en estas placas
 bool usbPresent() { return true; }   // sin deteccion VBUS: asumimos alimentado
+
+// Voltaje de bateria estimado en mV, para calibrar el divisor con un
+// voltimetro real en mano (ver STATS en el consola serie). No usado por el
+// resto del firmware.
+uint32_t batRawMv() { return analogReadMilliVolts(BAT_ADC) * 3; }
 
 void pwrSetup() {
   // Sin boton PWR dedicado en estas placas (solo BOOT/RESET) -- nada que armar

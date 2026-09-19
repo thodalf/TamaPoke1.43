@@ -35,6 +35,25 @@
 enum : uint8_t { SLEEP_NONE = 0, SLEEP_AUTO, SLEEP_PLAYER };
 #define DEF_TRAIN_TICKS 60                 // minutos de bienestar por +1 de DEF
 
+// Expeditions: the active pet leaves for a fixed duration and comes back with
+// items. Quantity scales with duration; the odds of WHICH item stay the same
+// regardless of how long the trip was.
+#define EXPED_MIN_15 15
+#define EXPED_MIN_30 30
+#define EXPED_MIN_60 60
+#define EXPED_ITEMS_15 2
+#define EXPED_ITEMS_30 4
+#define EXPED_ITEMS_60 7
+#define EXPED_PCT_POTION 65
+#define EXPED_PCT_POKEBALL 30
+// remaining 5% -> masterball, see rollLootItem()
+
+// Inventory items. Same three IDs feed both an expedition's loot roll and a
+// battle win's loot roll (rollLootItem()), so there is one weighted table
+// rather than two copies that could drift apart.
+enum : uint8_t { ITEM_POTION = 0, ITEM_POKEBALL = 1, ITEM_MASTERBALL = 2 };
+uint8_t rollLootItem();  // weighted pick among the three, EXPED_PCT_* above
+
 // ceremonias de fin de ciclo, y CER_CAUGHT -- que no es una ceremonia del pet
 // vivo en absoluto, solo comparte endedMon/endedKind: una captura salvaje
 // necesita un hueco igual que una despedida, y ese camino ya existe.
@@ -105,6 +124,29 @@ public:
   int16_t prevSpeciesId = -1;  // para la animacion de evolucion
   uint8_t careMistakes = 0;   // descuidos: cada uno retrasa la evolucion 1 nivel
   bool sleeping = false;
+  // Per-creature, like sleeping/frozen: newEgg() and adoptFrom() reset this,
+  // unlike the inventory below which is player-wide and outlives the pet.
+  // 0 = not away; 1/2/3 = which duration was picked (EXPED_MIN_15/30/60).
+  uint8_t expeditionKind = 0;
+  uint32_t expeditionReturnEpoch = 0;  // rtcEpoch() value it's due back at
+  bool onExpedition() const { return expeditionKind != 0; }
+  // Set once by resolveExpedition() so the expedition screen can show a
+  // one-time "welcome back" summary; RAM-only, cleared by whoever reads it.
+  bool expeditionJustReturned = false;
+  uint8_t expeditionLoot[3] = { 0, 0, 0 };  // what the last trip brought back, by ITEM_*
+  // Refuses while an expedition is already running, an egg is waiting, or a
+  // ceremony is in progress -- startExpedition() shares this with the picker
+  // screen so the UI can grey the buttons instead of merely refusing the tap.
+  bool canStartExpedition() const { return canInteractNow(); }
+  void startExpedition(uint8_t kind);  // kind = 1/2/3, see EXPED_MIN_*
+  uint32_t expeditionSecondsLeft() const;  // 0 if not away or already due
+  // THE single answer to "can the live pet be fed/played with/trained/bathed
+  // right now" -- an egg, a sleeping pet, a running ceremony and an absent
+  // (on-expedition) pet all say no. Every direct-interaction call site should
+  // ask this rather than keeping its own copy of the same three-way check.
+  bool canInteractNow() const {
+    return !isEgg() && !sleeping && ceremony == CER_NONE && !onExpedition();
+  }
   uint32_t lastSeenEpoch = 0;   // ultima hora RTC vista (para progresion offline)
   uint8_t ceremony = CER_NONE;  // despedida/escapada/liberacion en curso
   uint8_t lastEnd = CER_NONE;   // como acabo la anterior (afecta al huevo)
@@ -252,6 +294,20 @@ public:
   uint16_t badgesHard = 0;  // ... and on hard
   uint16_t badgesX[GYM_REGIONS - 1] = { 0 };
   uint16_t badgesHardX[GYM_REGIONS - 1] = { 0 };
+
+  // Player-wide, like the badges: outlives every creature, so newEgg() and
+  // adoptFrom() must never clear this. 5 starter Pokeballs is a courtesy
+  // default for both a brand-new save and an existing one loading this key
+  // for the first time -- see load()'s default parameter.
+  uint8_t pokeballs = 5;
+  uint8_t masterballs = 0;
+  uint8_t potions = 0;
+  // +1 to the matching counter (clamped at 255 by the uint8_t itself).
+  void giveItem(uint8_t item) {
+    if (item == ITEM_POKEBALL) { if (pokeballs < 255) pokeballs++; }
+    else if (item == ITEM_MASTERBALL) { if (masterballs < 255) masterballs++; }
+    else { if (potions < 255) potions++; }
+  }
 
   uint16_t badgeMask(uint8_t rg, bool hard) const {
     if (rg == 0) return hard ? badgesHard : badges;
@@ -500,6 +556,11 @@ private:
   void checkMedals();
   void tick();
   void applyAutoSleep();
+  // Checked from both tick() (foreground, rtcEpoch() directly) and
+  // syncClock() (boot catch-up) -- an expedition deadline is an epoch, like
+  // every other gameplay deadline that must survive a power-off, never a
+  // millis() timer.
+  void resolveExpedition();
   void hatch();
   void save();
   void load();

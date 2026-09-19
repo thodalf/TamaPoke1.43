@@ -37,7 +37,7 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
     "Elige tu inicial",
     "Sin sprites", "Cargalos en la SD",
     "PS", "IV %u",
-    "MENU", "AJUSTES", "CERRAR", "EQUIPO %u/6", "- vacio -", "%s se une al equipo!", "Equipo lleno: elige a quien sustituir", "Dejarlo ir",
+    "MENU", "AJUSTES", "CERRAR", "EQUIPO %u/5", "- vacio -", "%s se une al equipo!", "Equipo lleno: elige a quien sustituir", "Dejarlo ir",
     "STATS", "ENTRENAR", "FUERZA", "VELOCIDAD", "DEFENSA", "Toca: jugar a la pelota",
     "MOVIMIENTOS", "- vacio -", "Elige movimiento", "Toca para cambiar", "POT %u", "ESTADO",
     "%s quiere aprender", "No aprender",
@@ -50,7 +50,10 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
     "SALVAJE", "ATRAPAR", "Atrapado! %s ha sido capturado!", "%s escapo!",
     "VITALIDAD", "Toca: atrapar bayas", "PS +%u",
     "ACTIVAR", "no mientras se despide", "BRI %u", "%s ha huido!", "QUIZ",
-    "LEER", "SIN LIBROS", "ELEGIR LIBRO", "%u WPM", "FIN", "PAUSADO", },
+    "LEER", "SIN LIBROS", "ELEGIR LIBRO", "%u WPM", "FIN", "PAUSADO",
+    "INVENTARIO", "EXPEDICION", "BOLSA", "POKEBALL", "MASTERBALL", "POCION",
+    "%s x%u", "15 MIN", "30 MIN", "1 HORA", "VUELVE EN %u MIN", "DE VUELTA!",
+    "SIN POKEBALLS", "+%u MAS ENTRENADOS", "ENCONTRASTE %s", },
   // ---------------- EN ----------------
   {
     "Evolving!", "Yum yum!", "It likes it!", "It's hungry!", "Needs a bath!",
@@ -80,7 +83,7 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
     "Choose your starter",
     "No sprites", "Load them onto the SD",
     "HP", "IV %u",
-    "MENU", "SETTINGS", "CLOSE", "PARTY %u/6", "- empty -", "%s joined the party!", "Party full: pick who to replace", "Let it go",
+    "MENU", "SETTINGS", "CLOSE", "PARTY %u/5", "- empty -", "%s joined the party!", "Party full: pick who to replace", "Let it go",
     "STATS", "TRAINING", "STRENGTH", "SPEED", "DEFENCE", "Tap: play the ball game",
     "MOVES", "- empty -", "Choose a move", "Tap a slot to change", "PWR %u", "STATUS",
     "%s wants to learn", "Do not learn",
@@ -94,7 +97,10 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
     "WILD", "CAPTURE", "Gotcha! %s was caught!", "%s broke free!",
     "VITALITY", "Tap: catch berries", "HP +%u",
     "SWITCH", "not while it is leaving", "BRI %u", "%s fled!", "QUIZ",
-    "READ", "NO BOOKS", "CHOOSE A BOOK", "%u WPM", "THE END", "PAUSED", },
+    "READ", "NO BOOKS", "CHOOSE A BOOK", "%u WPM", "THE END", "PAUSED",
+    "INVENTORY", "EXPEDITION", "BAG", "POKEBALL", "MASTERBALL", "POTION",
+    "%s x%u", "15 MIN", "30 MIN", "1 HOUR", "BACK IN %u MIN", "WELCOME BACK!",
+    "OUT OF BALLS", "+%u MORE TRAINED", "FOUND %s", },
   // ---------------- FR ----------------
   {
     "Il evolue!", "Miam miam!", "Il aime ca!", "Il a faim!", "Besoin d'un bain!",
@@ -124,7 +130,7 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
     "Choisis ton starter",
     "Pas de sprites", "Charge-les sur la SD",
     "PV", "IV %u",
-    "MENU", "REGLAGES", "FERMER", "EQUIPE %u/6", "- vide -", "%s rejoint l'equipe!", "Equipe pleine: qui remplacer?", "Le laisser partir",
+    "MENU", "REGLAGES", "FERMER", "EQUIPE %u/5", "- vide -", "%s rejoint l'equipe!", "Equipe pleine: qui remplacer?", "Le laisser partir",
     "STATS", "ENTRAINEMENT", "FORCE", "VITESSE", "DEFENSE", "Touche: jouer au ballon",
     "CAPACITES", "- vide -", "Choisis une capacite", "Touche pour changer", "PUI %u", "STATUT",
     "%s veut apprendre", "Ne pas apprendre",
@@ -137,7 +143,10 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
     "SAUVAGE", "CAPTURER", "%s est capture!", "%s s'est echappe!",
     "VITALITE", "Touche: attraper des baies", "PV +%u",
     "ACTIVER", "pas pendant l adieu", "LUM %u", "%s a pris la fuite!", "QUIZ",
-    "LIRE", "AUCUN LIVRE", "CHOISIR UN LIVRE", "%u WPM", "FIN", "EN PAUSE", },
+    "LIRE", "AUCUN LIVRE", "CHOISIR UN LIVRE", "%u WPM", "FIN", "EN PAUSE",
+    "INVENTAIRE", "EXPEDITION", "SAC", "POKEBALL", "MASTERBALL", "POTION",
+    "%s x%u", "15 MIN", "30 MIN", "1 HEURE", "RETOUR DANS %u MIN", "DE RETOUR!",
+    "PLUS DE BALLS", "+%u AUTRES ENTRAINES", "TROUVE %s", },
   // ---------------- DE ----------------
   {
     "Entwickelt sich!", "Mampf mampf!", "Gefaellt ihm!", "Hat Hunger!", "Braucht ein Bad!",
@@ -167,7 +176,7 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
     "Waehle dein Starter",
     "Keine Sprites", "Auf die SD laden",
     "KP", "IV %u",
-    "MENU", "EINSTELLUNGEN", "SCHLIESSEN", "TEAM %u/6", "- leer -", "%s kommt ins Team!", "Team voll: wen ersetzen?", "Ziehen lassen",
+    "MENU", "EINSTELLUNGEN", "SCHLIESSEN", "TEAM %u/5", "- leer -", "%s kommt ins Team!", "Team voll: wen ersetzen?", "Ziehen lassen",
     "WERTE", "TRAINING", "STAERKE", "TEMPO", "ABWEHR", "Tippen: Ballspiel",
     "ATTACKEN", "- leer -", "Attacke waehlen", "Tippen zum Aendern", "STK %u", "STATUS",
     "%s will lernen", "Nicht lernen",
@@ -180,7 +189,10 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
     "WILD", "FANGEN", "%s gefangen!", "%s ist entkommen!",
     "VITALITAET", "Tippen: Beeren fangen", "KP +%u",
     "WECHSELN", "nicht waehrend des Abschieds", "HELL %u", "%s ist geflohen!", "QUIZ",
-    "LESEN", "KEINE BUECHER", "BUCH WAEHLEN", "%u WPM", "ENDE", "PAUSIERT", },
+    "LESEN", "KEINE BUECHER", "BUCH WAEHLEN", "%u WPM", "ENDE", "PAUSIERT",
+    "INVENTAR", "EXPEDITION", "TASCHE", "POKEBALL", "MASTERBALL", "TRANK",
+    "%s x%u", "15 MIN", "30 MIN", "1 STUNDE", "ZURUECK IN %u MIN", "ZURUECK!",
+    "KEINE BAELLE", "+%u WEITERE TRAINIERT", "GEFUNDEN %s", },
   // ---------------- IT ----------------
   {
     "Si evolve!", "Gnam gnam!", "Gli piace!", "Ha fame!", "Vuole un bagno!",
@@ -210,7 +222,7 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
     "Scegli l'iniziale",
     "Senza sprite", "Caricali sulla SD",
     "PS", "IV %u",
-    "MENU", "IMPOSTAZIONI", "CHIUDI", "SQUADRA %u/6", "- vuoto -", "%s entra in squadra!", "Squadra piena: chi sostituire?", "Lasciarlo andare",
+    "MENU", "IMPOSTAZIONI", "CHIUDI", "SQUADRA %u/5", "- vuoto -", "%s entra in squadra!", "Squadra piena: chi sostituire?", "Lasciarlo andare",
     "STATS", "ALLENAMENTO", "FORZA", "VELOCITA", "DIFESA", "Tocca: gioca alla palla",
     "MOSSE", "- vuoto -", "Scegli una mossa", "Tocca per cambiare", "POT %u", "STATO",
     "%s vuole imparare", "Non imparare",
@@ -223,7 +235,10 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
     "SELVATICO", "CATTURA", "%s catturato!", "%s e fuggito!",
     "VITALITA", "Tocca: prendi le bacche", "PS +%u",
     "ATTIVA", "non durante l addio", "LUM %u", "%s e scappato!", "QUIZ",
-    "LEGGI", "NESSUN LIBRO", "SCEGLI LIBRO", "%u WPM", "FINE", "IN PAUSA", },
+    "LEGGI", "NESSUN LIBRO", "SCEGLI LIBRO", "%u WPM", "FINE", "IN PAUSA",
+    "INVENTARIO", "SPEDIZIONE", "BORSA", "POKEBALL", "MASTERBALL", "POZIONE",
+    "%s x%u", "15 MIN", "30 MIN", "1 ORA", "TORNA TRA %u MIN", "BENTORNATO!",
+    "NIENTE BALL", "+%u ALTRI ADDESTRATI", "TROVATO %s", },
   // ---------------- PT ----------------
   {
     "Evoluindo!", "Nham nham!", "Ele gosta!", "Esta com fome!", "Precisa de banho!",
@@ -253,7 +268,7 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
     "Escolhe o inicial",
     "Sem sprites", "Carrega-os no SD",
     "PS", "IV %u",
-    "MENU", "AJUSTES", "FECHAR", "EQUIPA %u/6", "- vazio -", "%s junta-se a equipa!", "Equipa cheia: quem substituir?", "Deixa-lo ir",
+    "MENU", "AJUSTES", "FECHAR", "EQUIPA %u/5", "- vazio -", "%s junta-se a equipa!", "Equipa cheia: quem substituir?", "Deixa-lo ir",
     "STATS", "TREINO", "FORCA", "VELOCIDADE", "DEFESA", "Toca: joga a bola",
     "GOLPES", "- vazio -", "Escolhe um golpe", "Toca para mudar", "POT %u", "ESTADO",
     "%s quer aprender", "Nao aprender",
@@ -266,7 +281,10 @@ static const char *const STRINGS[LANG_COUNT][STR_COUNT] = {
     "SELVAGEM", "CAPTURAR", "%s foi capturado!", "%s fugiu!",
     "VITALIDADE", "Toca: apanhar bagas", "PS +%u",
     "ATIVAR", "nao durante a despedida", "BRI %u", "%s escapou!", "QUIZ",
-    "LER", "SEM LIVROS", "ESCOLHER LIVRO", "%u WPM", "FIM", "PAUSADO", },
+    "LER", "SEM LIVROS", "ESCOLHER LIVRO", "%u WPM", "FIM", "PAUSADO",
+    "INVENTARIO", "EXPEDICAO", "MOCHILA", "POKEBALL", "MASTERBALL", "POCAO",
+    "%s x%u", "15 MIN", "30 MIN", "1 HORA", "VOLTA EM %u MIN", "DE VOLTA!",
+    "SEM BOLAS", "+%u MAIS TREINADOS", "ENCONTROU %s", },
 };
 
 // Nombres de medalla en sus tres longitudes [idioma][medalla].

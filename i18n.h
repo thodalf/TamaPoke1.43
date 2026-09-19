@@ -153,6 +153,20 @@ enum StrId : uint8_t {
                     // same convention as "Lv." on the team-select cells
   S_THE_END,        // reached the end of the book
   S_PAUSED,         // RSVP: tapped to pause mid-book
+  // inventory / expeditions / the battle bag
+  S_INVENTORY,      // menu row + screen title: the item list
+  S_EXPEDITION,     // menu row + screen title: send the active pet off for items
+  S_BAG,            // battle menu cell: balls + potion
+  S_POKEBALL, S_MASTERBALL, S_POTION,   // bare item names
+  S_ITEM_COUNT_FMT, // "%s x%u" -- generic, shared by the inventory list, the
+                    // battle bag rows and the post-battle loot line
+  S_EXP_15, S_EXP_30, S_EXP_60,   // the three duration buttons
+  S_EXP_AWAY_FMT,   // "BACK IN %u MIN" -- shown while the pet is away
+  S_EXP_WELCOME,    // "WELCOME BACK!" -- shown once after a trip resolves
+  S_NO_BALLS,       // battle bag: both ball counts are zero
+  S_OTHERS_TRAINED_FMT,  // "+%u MORE TRAINED" -- other squad members besides
+                         // the live pet, win screen and the wild-win narration
+  S_LOOT_WON_FMT,   // "FOUND %s" -- post-battle loot, item name via S_POKEBALL etc.
   STR_COUNT
 };
 

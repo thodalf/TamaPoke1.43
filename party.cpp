@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "dex.h"
+#include "pet.h"   // Pet::trMaxFor(): the same IV-bound training ceiling, shared rather than duplicated
 
 Party party;
 
@@ -178,4 +179,29 @@ uint16_t Party::spaOf(const PartyMon &m) const {
 }
 uint16_t Party::spdOf(const PartyMon &m) const {
   return m.empty() ? 0 : calcStat(DEX_TBL[m.dex].bSpD, m.ivDef, m.level, m.trDef);
+}
+
+// Same shape as Pet::rewardTraining(), operating on a banked slot instead of
+// the live pet: random WHICH stat, but only among the ones with room left
+// under Pet::trMaxFor(iv), so a grant can never land on an already-capped
+// stat and silently evaporate.
+uint8_t Party::rewardTrainingAt(uint8_t idx, uint8_t amount, uint8_t &which) {
+  which = 0;
+  if (idx >= PARTY_SLOTS || slots[idx].empty() || !amount) return 0;
+  PartyMon &m = slots[idx];
+  uint8_t maxAtk = Pet::trMaxFor(m.ivAtk), maxDef = Pet::trMaxFor(m.ivDef),
+          maxSpe = Pet::trMaxFor(m.ivSpe);
+  uint8_t room[3], n = 0;
+  if (m.trAtk < maxAtk) room[n++] = 0;
+  if (m.trDef < maxDef) room[n++] = 1;
+  if (m.trSpe < maxSpe) room[n++] = 2;
+  if (!n) return 0;
+  which = room[random(n)];
+  uint8_t before, capped;
+  switch (which) {
+    case 0: before = m.trAtk; capped = maxAtk; m.trAtk = (uint8_t)min<uint16_t>(before + amount, capped); amount = m.trAtk - before; break;
+    case 1: before = m.trDef; capped = maxDef; m.trDef = (uint8_t)min<uint16_t>(before + amount, capped); amount = m.trDef - before; break;
+    default: before = m.trSpe; capped = maxSpe; m.trSpe = (uint8_t)min<uint16_t>(before + amount, capped); amount = m.trSpe - before; break;
+  }
+  return amount;
 }

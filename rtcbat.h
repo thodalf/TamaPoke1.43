@@ -14,6 +14,7 @@ void pmuEnablePanel();           // no-op (el rail de pantalla se activa por LCD
 int batPercent();                // siempre -1 (sin bateria/PMU detectable)
 bool batCharging();              // siempre false
 bool usbPresent();                // siempre true (asumimos alimentacion USB constante)
+uint32_t batRawMv();             // voltaje de bateria estimado, para calibrar contra un voltimetro
 
 // No hay boton PWR dedicado en esta placa (solo BOOT/RESET) -- no-ops
 void pwrSetup();

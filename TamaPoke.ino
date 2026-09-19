@@ -54,7 +54,7 @@
 
 // Version del firmware. Subir este numero en cada release (y manifest.json para
 // el instalador web). Se muestra en la pantalla de ajustes y por serie al arrancar.
-#define FW_VERSION "3.21"
+#define FW_VERSION "3.22"
 
 #if defined(TAMAPOKE_DISPLAY_QSPI_AMOLED)
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -317,7 +317,7 @@ bool menuOpen = false;
 // WILD. Slot 4 (the last row) is CLOSE on every page, at the same Y position,
 // so its hit-box never moves regardless of which page is showing.
 uint8_t menuPage = 0;
-#define MENU_PAGES 3
+#define MENU_PAGES 2
 #define MENU_X 73
 // Four rows: PARTY and GYMS came out, since a swipe right and a swipe left now
 // reach them directly. Sized to the bezel -- the panel is 320 wide, so 160 from
@@ -408,7 +408,7 @@ bool trainOpen = false;
 // circular bezel (same constraint the menu overlay hit), so it pages instead
 // of shrinking every row to squeeze one more in.
 uint8_t trainPage = 0;
-#define TRAIN_PAGES 2
+#define TRAIN_PAGES 3
 
 // move picker, opened from the MOVES card page. Most learnsets are level 0, so
 // a level-up "you learned a move" prompt would almost never fire -- the moveset
@@ -554,6 +554,12 @@ uint8_t rsvpPickPage = 0;
 char rsvpTitle[24] = "";     // current book's name, for the header
 char rsvpWord[24] = "";      // the word on screen right now
 uint32_t rsvpNextAt = 0;
+// A word over 6 letters is split in two and shown as two beats rather than
+// one -- long words are exactly what a fixed-duration flash reads worst.
+// The second half waits here; rsvpAdvanceWord() hands it out before pulling
+// a genuinely new word off the stream.
+char rsvpPendingHalf[24] = "";
+bool rsvpWordIsSplit = false;  // true for BOTH halves of a split word
 bool rsvpPaused = false;
 bool rsvpDone = false;       // reached the end of the book
 
@@ -2327,6 +2333,20 @@ void onTap(int16_t x, int16_t y) {
     bool inPanel = (x >= TRAIN_X && x <= TRAIN_X + TRAIN_W &&
                     y >= TRAIN_Y && y <= TRAIN_Y + TRAIN_H);
     if (!inPanel) { trainOpen = false; return; }   // tap outside = back to the pet
+    if (trainPage == 2) {
+      for (int i = 0; i < 3; i++) {
+        int ry = TRAIN_ROW_Y(i);
+        if (x < TRAIN_X + 18 || x > TRAIN_X + TRAIN_W - 18) continue;
+        if (y < ry || y > ry + TRAIN_ROW_H) continue;
+        if (i == 0) {   // QUIZ
+          if (!pet.canInteractNow()) { sfxPlay(SFX_DENY); return; }
+          sfxPlay(SFX_TAP); trainOpen = false; startQuiz(); return;
+        }
+        if (i == 1) { sfxPlay(SFX_TAP); trainOpen = false; startRsvp(); return; }  // READ
+        sfxPlay(SFX_TAP); trainOpen = false; expeditionOpen = true; return;        // EXPEDITION
+      }
+      return;
+    }
     int rows = (trainPage == 0) ? 3 : 1;   // page 1 only has VITALITY so far
     for (int i = 0; i < rows; i++) {
       int ry = TRAIN_ROW_Y(i);
@@ -2363,7 +2383,7 @@ void onTap(int16_t x, int16_t y) {
         sfxPlay(SFX_TAP);
         menuOpen = false;
         if (i == 0) { cardOpen = true; cardPage = 1; }   // straight to the stats page
-        else if (i == 1) { galleryOpen = true; galleryPick = true; galleryPage = 0; rpickPage = 0; galleryDetail = 0; galleryDirty = true; }
+        else if (i == 1) { inventoryOpen = true; }
         else if (i == 2) { openClock(); }
         else if (i == 3) {   // WILD
           if (pet.isEgg() || pet.ceremony != CER_NONE) { sfxPlay(SFX_DENY); return; }
@@ -2374,23 +2394,10 @@ void onTap(int16_t x, int16_t y) {
         sfxPlay(SFX_TAP);
         menuOpen = false;
         choiceKind = 3; choiceUntil = millis() + 12000;
-      } else if (menuPage == 1 && i == 1) {   // QUIZ
-        if (!pet.canInteractNow()) { sfxPlay(SFX_DENY); return; }
+      } else if (menuPage == 1 && i == 1) {   // POKEDEX
         sfxPlay(SFX_TAP);
         menuOpen = false;
-        startQuiz();
-      } else if (menuPage == 1 && i == 2) {   // READ
-        sfxPlay(SFX_TAP);
-        menuOpen = false;
-        startRsvp();
-      } else if (menuPage == 2 && i == 0) {   // INVENTORY
-        sfxPlay(SFX_TAP);
-        menuOpen = false;
-        inventoryOpen = true;
-      } else if (menuPage == 2 && i == 1) {   // EXPEDITION
-        sfxPlay(SFX_TAP);
-        menuOpen = false;
-        expeditionOpen = true;
+        galleryOpen = true; galleryPick = true; galleryPage = 0; rpickPage = 0; galleryDetail = 0; galleryDirty = true;
       }
       // any other slot on this page is empty: no-op, the menu stays open
       return;
@@ -3002,19 +3009,39 @@ void render() {
     char name[28];
     const char *base = pet.nick[0] ? pet.nick : dexName(pet.speciesId);
     snprintf(name, sizeof(name), T(S_NAME_FMT), pet.shiny ? "*" : "", base, pet.level());
-    drawHeader(name, gNight ? UI_INK_NIGHT : d.accent, statusMsg());
-    drawStreakBadge();
-    drawPet();
-    drawBath();
-    drawPoops();
-    // panel inferior: base limpia para barras y botones sobre el paisaje
-    gfx->fillRect(0, 312, 466, 154, gNight ? UI_BG_NIGHT : UI_BG_DAY);
-    drawBars();
-    drawButtons();
-    drawCelebration();
-    if (pet.wantEvolveButton()) drawEvolveButton();        // CTA rojo: evolucionar
-    else if (pet.canRunawayNow()) drawRunawayButton();     // CTA sombrio: escapada (abandono)
-    else if (pet.wantFarewellButton()) drawFarewellButton();  // CTA dorado: despedida
+    if (pet.onExpedition()) {
+      // Nothing to animate while the pet is away -- no sprite, no bath, no
+      // poops, no evolve/runaway/farewell CTA (there's no one on screen to
+      // see it). Bars and buttons still draw: the stats keep draining
+      // normally (see canInteractNow()'s comment) and the buttons show
+      // correctly greyed via uiButtonDisabled().
+      drawHeader(name, gNight ? UI_INK_NIGHT : d.accent, T(S_EXPEDITION));
+      drawStreakBadge();
+      char away[24];
+      snprintf(away, sizeof(away), T(S_EXP_AWAY_FMT),
+               (unsigned)((pet.expeditionSecondsLeft() + 59) / 60));
+      gfx->setTextColor(inkColor());
+      gfx->setTextSize(2);
+      gfx->setCursor(CX - (int)strlen(away) * 6, PET_CY);
+      gfx->print(away);
+      gfx->fillRect(0, 312, 466, 154, gNight ? UI_BG_NIGHT : UI_BG_DAY);
+      drawBars();
+      drawButtons();
+    } else {
+      drawHeader(name, gNight ? UI_INK_NIGHT : d.accent, statusMsg());
+      drawStreakBadge();
+      drawPet();
+      drawBath();
+      drawPoops();
+      // panel inferior: base limpia para barras y botones sobre el paisaje
+      gfx->fillRect(0, 312, 466, 154, gNight ? UI_BG_NIGHT : UI_BG_DAY);
+      drawBars();
+      drawButtons();
+      drawCelebration();
+      if (pet.wantEvolveButton()) drawEvolveButton();        // CTA rojo: evolucionar
+      else if (pet.canRunawayNow()) drawRunawayButton();     // CTA sombrio: escapada (abandono)
+      else if (pet.wantFarewellButton()) drawFarewellButton();  // CTA dorado: despedida
+    }
   }
 
   if (pet.sleeping) {
@@ -5758,8 +5785,51 @@ void renderQuiz() {
 #define RSVP_SPD_BTN_W 48
 #define RSVP_SPD_BTN_H 30
 
+// A word ending the way a clause or sentence does deserves a beat longer to
+// land -- same reason a split word's second half does (it is finishing a
+// thought a fixed-duration flash already made harder to read), and a
+// capitalised word usually opens a sentence or names something, both worth
+// a fraction more attention.
+static bool rsvpEndsClause(const char *w) {
+  size_t n = strlen(w);
+  return n && (w[n - 1] == '.' || w[n - 1] == ',');
+}
+
 static void rsvpScheduleNext() {
-  rsvpNextAt = millis() + 60000UL / rsvpWpm();
+  uint32_t base = 60000UL / rsvpWpm();
+  bool pause = rsvpWordIsSplit || rsvpEndsClause(rsvpWord) ||
+               (rsvpWord[0] >= 'A' && rsvpWord[0] <= 'Z');
+  rsvpNextAt = millis() + (pause ? base * 2 : base);
+}
+
+// Hands out the second half of a split word before pulling a new one off the
+// stream. A word over 6 letters is split roughly in half and shown as two
+// beats -- long words are exactly what a fixed-duration flash reads worst,
+// and both halves count as "split" for rsvpScheduleNext()'s pause above.
+static bool rsvpAdvanceWord() {
+  if (rsvpPendingHalf[0]) {
+    strncpy(rsvpWord, rsvpPendingHalf, sizeof(rsvpWord) - 1);
+    rsvpWord[sizeof(rsvpWord) - 1] = 0;
+    rsvpPendingHalf[0] = 0;
+    rsvpWordIsSplit = true;
+    return true;
+  }
+  char raw[24];
+  if (!gBook.nextWord(raw, sizeof(raw))) return false;
+  size_t len = strlen(raw);
+  if (len > 6) {
+    size_t half = len / 2;
+    memcpy(rsvpWord, raw, half);
+    rsvpWord[half] = 0;
+    strncpy(rsvpPendingHalf, raw + half, sizeof(rsvpPendingHalf) - 1);
+    rsvpPendingHalf[sizeof(rsvpPendingHalf) - 1] = 0;
+    rsvpWordIsSplit = true;
+  } else {
+    strncpy(rsvpWord, raw, sizeof(rsvpWord) - 1);
+    rsvpWord[sizeof(rsvpWord) - 1] = 0;
+    rsvpWordIsSplit = false;
+  }
+  return true;
 }
 
 // Opens `name` (no path or .txt suffix -- BookReader adds both) and resumes
@@ -5771,10 +5841,11 @@ static void rsvpOpenBook(const char *name) {
   rsvpPaused = false;
   rsvpDone = false;
   rsvpWord[0] = 0;
+  rsvpPendingHalf[0] = 0;
   if (!gBook.open(name)) { rsvpDone = true; return; }
   uint32_t resume = rsvpLoadProgress(name);
   if (resume) gBook.seek(resume);
-  if (!gBook.nextWord(rsvpWord, sizeof(rsvpWord))) { rsvpDone = true; return; }
+  if (!rsvpAdvanceWord()) { rsvpDone = true; return; }
   rsvpScheduleNext();
 }
 
@@ -5829,7 +5900,8 @@ void rsvpTap(int16_t x, int16_t y) {
     sfxPlay(SFX_TAP);
     gBook.seek(0);
     rsvpDone = false;
-    if (gBook.nextWord(rsvpWord, sizeof(rsvpWord))) rsvpScheduleNext();
+    rsvpPendingHalf[0] = 0;
+    if (rsvpAdvanceWord()) rsvpScheduleNext();
     else rsvpDone = true;   // an empty book: nothing to restart into
     return;
   }
@@ -5854,6 +5926,43 @@ void rsvpTap(int16_t x, int16_t y) {
   sfxPlay(SFX_TAP);
   rsvpPaused = !rsvpPaused;
   if (!rsvpPaused) rsvpScheduleNext();
+}
+
+// The ORP (optimal recognition point): the letter the eye would naturally
+// land on first, which RSVP holds fixed on screen instead of letting the eye
+// hunt for it -- that fixed fixation point is the entire premise noted at
+// the top of this section. Standard length-based heuristic, same one Spritz
+// and other RSVP readers use.
+static uint8_t rsvpOrpIndex(uint8_t len) {
+  if (len <= 1) return 0;
+  if (len <= 5) return 1;
+  if (len <= 9) return 2;
+  if (len <= 13) return 3;
+  return 4;
+}
+
+// Draws the word so the ORP letter's centre lands exactly on CX regardless
+// of word length -- a plain centred string would put a different letter
+// under the eye every time. The ORP letter is red with a short tick above
+// and below it, the visual fixation point to focus on rather than the word.
+static void drawRsvpWord(const char *word) {
+  uint8_t len = (uint8_t)strlen(word);
+  if (!len) return;
+  uint8_t orp = rsvpOrpIndex(len);
+  if (orp >= len) orp = len - 1;
+  const int charW = 24;   // textSize4 in this font is 6px/char * 4
+  const int y = 200;
+  int x0 = CX - orp * charW - charW / 2;
+  int pivotCx = x0 + orp * charW + charW / 2;
+  gfx->fillRect(pivotCx - 1, y - 10, 2, 6, UI_BAR_BAD);
+  gfx->fillRect(pivotCx - 1, y + 34, 2, 6, UI_BAR_BAD);
+  gfx->setTextSize(4);
+  for (uint8_t i = 0; i < len; i++) {
+    gfx->setTextColor(i == orp ? UI_BAR_BAD : UI_INK);
+    gfx->setCursor(x0 + i * charW, y);
+    char c[2] = { word[i], 0 };
+    gfx->print(c);
+  }
 }
 
 void renderRsvp() {
@@ -5909,7 +6018,7 @@ void renderRsvp() {
   // same pattern renderQuiz() uses for its own countdown, so there is exactly
   // one place that decides "is it time yet" for either screen
   if (!rsvpPaused && millis() >= rsvpNextAt) {
-    if (!gBook.nextWord(rsvpWord, sizeof(rsvpWord))) {
+    if (!rsvpAdvanceWord()) {
       rsvpDone = true;
       rsvpSaveProgress(rsvpTitle, gBook.bytePos);
       sfxPlay(SFX_MEDAL);
@@ -5927,10 +6036,7 @@ void renderRsvp() {
     gfx->fillRoundRect(53, 76, 360 * pct / 100, 8, 4, UI_BAR_OK);
   }
 
-  gfx->setTextColor(UI_INK);
-  gfx->setTextSize(4);
-  gfx->setCursor(CX - (int)strlen(rsvpWord) * 12, 200);
-  gfx->print(rsvpWord);
+  drawRsvpWord(rsvpWord);
 
   if (rsvpPaused) {
     const char *p = T(S_PAUSED);
@@ -6746,30 +6852,24 @@ void renderCard() {
 
 // ---------- menu overlay ----------
 
-// Row labels are built fresh each frame because two of them carry live counts.
-// Page-aware: slot 4 is always CLOSE, page 0 is today's four rows, page 1 has
-// RETIRE at slot 0, QUIZ at slot 1 and READ at slot 2 (3 is empty, drawMenu
-// skips it).
+// Row labels are built fresh each frame because the Pokedex one carries a
+// live count. Page-aware: slot 4 is always CLOSE, page 0 is STATS/INVENTORY/
+// SETTINGS/WILD, page 1 is RETIRE/POKEDEX (slots 2-3 empty, drawMenu skips
+// them). QUIZ, READ and EXPEDITION moved to the training submenu (5th home
+// icon) -- see renderTrain()'s page 2.
 static void menuRowLabel(int i, char *out, size_t n) {
   if (i == MENU_ROWS - 1) { snprintf(out, n, "%s", T(S_CLOSE)); return; }
   if (menuPage == 0) {
     switch (i) {
       case 0: snprintf(out, n, "%s", T(S_STATS)); break;
-      case 1: snprintf(out, n, T(S_POKEDEX_FMT), pet.registeredCount(), DEX_COUNT); break;
+      case 1: snprintf(out, n, "%s", T(S_INVENTORY)); break;   // swapped with Pokedex, see page 1
       case 2: snprintf(out, n, "%s", T(S_SETTINGS)); break;
       default: snprintf(out, n, "%s", T(S_WILD_BATTLE)); break;
     }
   } else if (menuPage == 1) {
     switch (i) {
       case 0: snprintf(out, n, "%s", T(S_RETIRE)); break;
-      case 1: snprintf(out, n, "%s", T(S_QUIZ)); break;
-      case 2: snprintf(out, n, "%s", T(S_READ)); break;
-      default: out[0] = 0; break;
-    }
-  } else if (menuPage == 2) {
-    switch (i) {
-      case 0: snprintf(out, n, "%s", T(S_INVENTORY)); break;
-      case 1: snprintf(out, n, "%s", T(S_EXPEDITION)); break;
+      case 1: snprintf(out, n, T(S_POKEDEX_FMT), pet.registeredCount(), DEX_COUNT); break;
       default: out[0] = 0; break;
     }
   } else {
@@ -6796,16 +6896,11 @@ void drawMenu() {
 
   for (int i = 0; i < MENU_ROWS; i++) {
     bool close = (i == MENU_ROWS - 1);
-    if (menuPage == 1 && i > 2 && !close) continue;   // empty slot: nothing drawn
-    if (menuPage == 2 && i > 1 && !close) continue;   // empty slots: nothing drawn
+    if (menuPage == 1 && i > 1 && !close) continue;   // empty slots: nothing drawn
     int y = MENU_ROW_Y(i);
     bool dead = close ? false :
                 (menuPage == 0 && i == 3 && (pet.isEgg() || pet.ceremony != CER_NONE)) ||
-                (menuPage == 1 && i == 0 && !pet.canRetireNow()) ||   // an egg or a companion
-                (menuPage == 1 && i == 1 && !pet.canInteractNow()) ||
-                // EXPEDITION stays live while already away (to check the
-                // countdown); only greyed when a NEW trip could not start.
-                (menuPage == 2 && i == 1 && !pet.onExpedition() && !pet.canInteractNow());
+                (menuPage == 1 && i == 0 && !pet.canRetireNow());   // an egg or a companion
     gfx->fillRoundRect(MENU_X + 18, y, MENU_W - 36, MENU_ROW_H, 12,
                        close || dead ? UI_TRACK : UI_BG_DAY);
     gfx->drawRoundRect(MENU_X + 18, y, MENU_W - 36, MENU_ROW_H, 12, UI_INK);
@@ -6844,6 +6939,31 @@ void renderTrain() {
     int dx = CX - (TRAIN_PAGES - 1) * 7 + i * 14;
     if (i == trainPage) gfx->fillCircle(dx, TRAIN_Y + 40, 3, UI_INK);
     else gfx->drawCircle(dx, TRAIN_Y + 40, 2, UI_INK);
+  }
+
+  if (trainPage == 2) {
+    // Not a trainable stat, so no progress bar -- QUIZ/READ/EXPEDITION are
+    // plain rows, same visual family as the menu's, just relocated here.
+    const char *lbl3[3] = { T(S_QUIZ), T(S_READ), T(S_EXPEDITION) };
+    bool dead3[3] = {
+      !pet.canInteractNow(),
+      false,
+      // EXPEDITION stays live while already away (to check the countdown);
+      // only greyed when a NEW trip could not start.
+      !pet.onExpedition() && !pet.canInteractNow(),
+    };
+    for (int i = 0; i < 3; i++) {
+      int y = TRAIN_ROW_Y(i);
+      gfx->fillRoundRect(TRAIN_X + 18, y, TRAIN_W - 36, TRAIN_ROW_H, 12,
+                         dead3[i] ? UI_TRACK : UI_BG_DAY);
+      gfx->drawRoundRect(TRAIN_X + 18, y, TRAIN_W - 36, TRAIN_ROW_H, 12, UI_INK);
+      gfx->setTextColor(UI_INK);
+      gfx->setTextSize(2);
+      gfx->setCursor(TRAIN_X + 32, y + TRAIN_ROW_H / 2 - 8);
+      gfx->print(lbl3[i]);
+    }
+    gfx->flush();
+    return;
   }
 
   int rows = (trainPage == 0) ? 3 : 1;
@@ -7484,8 +7604,24 @@ void drawBattery() {
   }
 }
 
+// HH:MM off the same 30s-cached epoch sceneHour() uses, rather than a fresh
+// rtcEpoch() read every frame -- this project treats the RTC's raw epoch as
+// local time throughout (no timezone conversion anywhere), so this is
+// consistent with the rest of the clock UI.
+void drawClockTime() {
+  uint32_t e = pet.lastSeenEpoch;
+  if (!e) return;   // no valid time yet: nothing to show rather than 00:00
+  char t[6];
+  snprintf(t, sizeof(t), "%02u:%02u", (unsigned)((e / 3600) % 24), (unsigned)((e / 60) % 60));
+  gfx->setTextColor(inkColor());
+  gfx->setTextSize(1);
+  gfx->setCursor(CX + 20, 14);
+  gfx->print(t);
+}
+
 void drawHeader(const char *name, uint16_t nameColor, const char *msg) {
   drawBattery();
+  drawClockTime();
   gfx->setTextColor(nameColor);
   gfx->setTextSize(3);
   gfx->setCursor(CX - strlen(name) * 9, 52);

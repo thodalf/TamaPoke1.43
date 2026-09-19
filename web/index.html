@@ -245,6 +245,21 @@ async function waitFor(token, timeoutMs = 6000) {
 
 const enc = new TextEncoder();
 
+// The firmware's bitmap font has no accented glyphs (see CLAUDE.md's hard
+// rule on this) -- worse, BookReader::nextWord() drops any byte outside
+// 0x20-0x7E one at a time, so an accented UTF-8 character doesn't render
+// wrong, it silently EATS letters out of the word ("café" -> "caf"). Strip
+// accents here, before a book ever reaches the board, rather than let the
+// firmware's byte-dropping mangle it.
+function stripAccents(text) {
+  const COMBINING_MARKS = /[̀-ͯ]/g;   // left after normalize('NFD') splits e.g. e + acute
+  return text
+    .normalize('NFD').replace(COMBINING_MARKS, '')
+    .replace(/œ/g, 'oe').replace(/Œ/g, 'OE')   // oe/OE ligature -- NFD doesn't decompose these
+    .replace(/æ/g, 'ae').replace(/Æ/g, 'AE')   // ae/AE ligature
+    .replace(/ß/g, 'ss');                            // German sharp s
+}
+
 // sends one file to the board with the PUT protocol (name includes the mons/ prefix)
 async function sendOne(name, data) {
   await writer.write(enc.encode(`PUT ${name} ${data.length}\n`));
@@ -391,7 +406,10 @@ document.getElementById('bookFiles').onchange = async (ev) => {
   ev.target.value = '';
   if (!writer) { log('Connect the board first.'); return; }
   const items = [];
-  for (const f of files) items.push({ name: 'books/' + f.name, data: new Uint8Array(await f.arrayBuffer()) });
+  for (const f of files) {
+    const text = stripAccents(new TextDecoder().decode(await f.arrayBuffer()));
+    items.push({ name: 'books/' + f.name, data: enc.encode(text) });
+  }
   log(`${items.length} book(s). Sending...`);
   await sendAll(items);
 };

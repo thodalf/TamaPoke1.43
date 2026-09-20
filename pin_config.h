@@ -122,7 +122,19 @@
 #undef TAMAPOKE_HAS_PMU              // solo un IC cargador (ETA6098) + LDO, sin PMU
 #undef TAMAPOKE_HAS_AUDIO_ES8311     // sin codec de audio en el esquematico
 #define TAMAPOKE_DISPLAY_RGB_ST7701 1
-#define TAMAPOKE_SD_SPI_SHARED_LCD 1  // SD por SPI, bus COMPARTIDO con el init del LCD; CS por el expansor
+// SD_MMC nativo de 1 bit, NO SPI -- confirmado byte a byte contra el
+// SD_Card.cpp/h oficial de Waveshare (Demo.zip de la wiki): usan
+// SD_MMC.setPins(SD_CLK_PIN=2, SD_CMD_PIN=1, SD_D0_PIN=42) y
+// SD_MMC.begin("/sdcard", true), exactamente los mismos pines que
+// LCD_INIT_SCK/LCD_INIT_MOSI/SDMMC_DATA de mas abajo. El intento anterior de
+// tratar esto como SD-por-SPI (TAMAPOKE_SD_SPI_SHARED_LCD) explicaba
+// "SD no detectada" en todo boot real: la tarjeta nunca responde al
+// protocolo SPI sobre pines cableados para SD_MMC de 1 bit, el mismo sintoma
+// documentado arriba para la 1.43 al reves. La linea EXIO_SD_CS (EXIO_PIN4
+// en el codigo oficial) tampoco es un CS SPI aqui -- es la linea D3 de la
+// tarjeta, que SD_D3_EN() pone en ALTO (no bajo) antes de montar.
+#define TAMAPOKE_SD_NATIVE_SDMMC 1
+#define TAMAPOKE_SD_MMC_D3_EXIO 1  // ver sdBegin(): D3 debe ir alto, no es un CS
 
 #define LCD_WIDTH 480
 #define LCD_HEIGHT 480

@@ -1,6 +1,6 @@
 {
   "name": "TamaPoke (Waveshare ESP32-S3-Touch-AMOLED-1.75)",
-  "version": "3.24",
+  "version": "3.25",
   "new_install_prompt_erase": true,
   "builds": [
     {

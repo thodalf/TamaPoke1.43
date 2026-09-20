@@ -54,7 +54,7 @@
 
 // Version del firmware. Subir este numero en cada release (y manifest.json para
 // el instalador web). Se muestra en la pantalla de ajustes y por serie al arrancar.
-#define FW_VERSION "3.24"
+#define FW_VERSION "3.25"
 
 #if defined(TAMAPOKE_DISPLAY_QSPI_AMOLED)
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -92,20 +92,70 @@ TouchDrvFT6X36 touch;
 // por un sub-bus SPI de 3 hilos propio (ver st7701InitSequence() mas abajo);
 // Arduino_ESP32RGBPanel + Arduino_RGB_Display solo se ocupan de empujar
 // pixeles una vez el panel ya esta inicializado.
+// bounce_buffer_size_px: without it, the RGB peripheral DMAs straight out of
+// PSRAM, whose access latency can't keep up with a continuous 30MHz pixel
+// clock -- a well-documented ESP32-S3 RGB-LCD trap where the panel never
+// gets a stable frame at all (blank/no image, not just tearing), rather than
+// a merely cosmetic glitch. 10 lines of SRAM bounce buffer, matching a
+// confirmed-working independent ST7701/480-wide config for this same chip.
+// hsync_polarity/vsync_polarity=1 (not 0): confirmed by diffing against the
+// official esp_lcd_rgb_panel_config_t in Waveshare's own Display_ST7701.cpp
+// (Demo.zip). That struct never sets .timings.flags.hsync_idle_low/
+// vsync_idle_low at all, so both are 0 (idle HIGH, active LOW) by C
+// zero-init. Arduino_ESP32RGBPanel::getFrameBuffer() computes
+// hsync_idle_low = (hsync_polarity==0) ? 1 : 0 -- passing 0 here (as this
+// code did originally) requests idle_low=1, the OPPOSITE polarity from the
+// official config, even though the numeric porch widths/pulses all matched.
+// A flipped sync polarity is consistent with what real hardware showed:
+// colored stripes rather than a properly framed (even if miscolored) image.
 Arduino_ESP32RGBPanel *rgbBus = new Arduino_ESP32RGBPanel(
   LCD_DE, LCD_VSYNC, LCD_HSYNC, LCD_PCLK,
   LCD_R0, LCD_R1, LCD_R2, LCD_R3, LCD_R4,
   LCD_G0, LCD_G1, LCD_G2, LCD_G3, LCD_G4, LCD_G5,
   LCD_B0, LCD_B1, LCD_B2, LCD_B3, LCD_B4,
-  0 /*hsync_polarity*/, 50 /*hsync_front_porch*/, 8 /*hsync_pulse_width*/, 10 /*hsync_back_porch*/,
-  0 /*vsync_polarity*/, 8 /*vsync_front_porch*/, 2 /*vsync_pulse_width*/, 18 /*vsync_back_porch*/,
-  0 /*pclk_active_neg*/, 30000000 /*prefer_speed*/);
+  1 /*hsync_polarity*/, 50 /*hsync_front_porch*/, 8 /*hsync_pulse_width*/, 10 /*hsync_back_porch*/,
+  1 /*vsync_polarity*/, 8 /*vsync_front_porch*/, 2 /*vsync_pulse_width*/, 18 /*vsync_back_porch*/,
+  0 /*pclk_active_neg*/, 16000000 /*prefer_speed*/, false /*useBigEndian*/,
+  0 /*de_idle_high*/, 0 /*pclk_idle_high*/, 10 * LCD_WIDTH /*bounce_buffer_size_px*/);
+// Bounce buffer reverted to 10 lines (the confirmed-official value) after 40
+// made the visible "jumping" WORSE on real hardware, not better -- so a
+// bigger staging buffer was not the lever for this.
+//
+// pclk dropped 30MHz -> 16MHz: Arduino_ESP32RGBPanel hardcodes its RGB LCD
+// clk_src (LCD_CLK_SRC_DEFAULT/PLL160M) rather than the official demo's
+// LCD_CLK_SRC_PLL240M, and that's not overridable through this library's
+// public constructor. A different source PLL means 30MHz may not land on an
+// achievable clean divider, and a marginal pixel clock is a well-known cause
+// of intermittent frame-sync loss (looks like the image "jumping") on
+// ESP32-S3 RGB panels, as opposed to the earlier, stably-WRONG striped
+// pattern from the sync-polarity bug. 16MHz measurably reduced the jumping
+// on real hardware versus 30MHz; 12MHz was also tried and made no further
+// difference, so the remaining residual instability is very likely the
+// separate, architectural single-framebuffer-tearing issue documented in
+// PORTAGE_28ROUND.md, not further clock tuning. 16MHz is a much more commonly used,
+// conservative value for 480x480 ST7701 RGB panels in this class of board.
 // bus=nullptr, rst=GFX_NOT_DEFINED, init_operations=nullptr: el reset y el
 // init del ST7701 se hacen a mano (RESET/CS via el expansor TCA9554) ANTES de
 // gfx->begin(), asi que Arduino_RGB_Display no debe tocar ninguno de los dos.
-Arduino_GFX *gfx = new Arduino_RGB_Display(
+Arduino_GFX *rgbDisplay = new Arduino_RGB_Display(
   LCD_WIDTH, LCD_HEIGHT, rgbBus, 0 /*rotation*/, true /*auto_flush*/,
   nullptr, GFX_NOT_DEFINED, nullptr, 0);
+// Wrapped in a Canvas, the same architecture the 1.75/1.43 boards already
+// use (Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, panel) above) -- NOT a
+// cosmetic match, a real fix. Without it, `gfx` WAS the live framebuffer the
+// RGB peripheral continuously scans out, so every one of the game's many
+// per-frame draw calls was visible mid-composition: real hardware showed
+// this as the screen "jumping". A Canvas composes the whole frame into its
+// OWN separate PSRAM buffer -- invisible to the panel, nothing reads it
+// concurrently -- and gfx->flush() (already called after every screen render
+// throughout the sketch; flush_test already asserts every screen does this)
+// now does exactly one bulk Arduino_RGB_Display::draw16bitRGBBitmap() call
+// to push the finished frame, instead of being a no-op it was previously
+// (auto_flush=true already handled cache write-back per pixel, so a bare
+// Arduino_RGB_Display's own flush() had nothing left to do). One contiguous
+// 450 KB copy is a far smaller tear window than the whole render loop
+// spread across many separate primitive draws with logic interleaved.
+Arduino_GFX *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, rgbDisplay);
 
 TouchDrvGT911 touch;
 #endif
@@ -130,18 +180,19 @@ void setPanelBrightness(uint8_t v) {
 // son de calibracion de gamma/timing propios del lote de panel; no se han
 // tocado a proposito, tal como los entrego Waveshare.
 static spi_device_handle_t gSt7701Spi = nullptr;
+static uint16_t gSt7701XferFail = 0;  // bring-up diagnostic: count of failed SPI transfers
 
 static void st7701Cmd(uint8_t cmd) {
   spi_transaction_t t = {};
   t.cmd = 0;
   t.addr = cmd;
-  spi_device_transmit(gSt7701Spi, &t);
+  if (spi_device_transmit(gSt7701Spi, &t) != ESP_OK) gSt7701XferFail++;
 }
 static void st7701Dat(uint8_t data) {
   spi_transaction_t t = {};
   t.cmd = 1;
   t.addr = data;
-  spi_device_transmit(gSt7701Spi, &t);
+  if (spi_device_transmit(gSt7701Spi, &t) != ESP_OK) gSt7701XferFail++;
 }
 
 static void st7701Reset() {
@@ -161,7 +212,10 @@ static void st7701Init() {
   buscfg.quadwp_io_num = -1;
   buscfg.quadhd_io_num = -1;
   buscfg.max_transfer_sz = 64;
-  spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+  esp_err_t busErr = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+  if (busErr != ESP_OK) {
+    Serial.printf("st7701: spi_bus_initialize fallo (%s)\n", esp_err_to_name(busErr));
+  }
   spi_device_interface_config_t devcfg = {};
   devcfg.command_bits = 1;   // 0=comando, 1=dato -- protocolo de 3 hilos del ST7701
   devcfg.address_bits = 8;   // el byte real (comando o dato) viaja en "address"
@@ -169,10 +223,19 @@ static void st7701Init() {
   devcfg.clock_speed_hz = 40000000;
   devcfg.spics_io_num = -1;  // CS lo maneja el expansor TCA9554, no la SPI
   devcfg.queue_size = 1;
-  spi_bus_add_device(SPI2_HOST, &devcfg, &gSt7701Spi);
+  esp_err_t devErr = spi_bus_add_device(SPI2_HOST, &devcfg, &gSt7701Spi);
+  if (devErr != ESP_OK) {
+    Serial.printf("st7701: spi_bus_add_device fallo (%s)\n", esp_err_to_name(devErr));
+  }
 
   st7701Reset();
-  tca9554Write(EXIO_LCD_CS, false);  // activo bajo
+  tca9554Write(EXIO_LCD_CS, false);  // activo bajo -- confirmado byte a byte
+  // contra el Display_ST7701.cpp oficial de Waveshare (Demo.zip de la wiki):
+  // ST7701_CS_EN() pone EXIO_PIN3 en Low para seleccionar el chip. El intento
+  // anterior de invertir esto durante el bring-up en vivo fue un error --
+  // coincidio con el cambio visible de "franjas" a "negro", pero la causa
+  // real de las franjas era el bounce buffer que faltaba (ver mas abajo,
+  // getFrameBuffer()), no la polaridad del CS.
   delay(10);
 
   st7701Cmd(0xFF); st7701Dat(0x77); st7701Dat(0x01); st7701Dat(0x00); st7701Dat(0x00); st7701Dat(0x13);
@@ -235,13 +298,23 @@ static void st7701Init() {
   st7701Cmd(0xFF); st7701Dat(0x77); st7701Dat(0x01); st7701Dat(0x00); st7701Dat(0x00); st7701Dat(0x00);
 
   st7701Cmd(0x11); delay(120);       // sleep out
-  st7701Cmd(0x3A); st7701Dat(0x66);  // formato de pixel: RGB565
+  // 0x66 confirmed correct against the official Display_ST7701.cpp (Waveshare
+  // Demo.zip, wiki): the comment there literally reads "0x66 / 0x77". This
+  // board's 16 wired data lines don't need to match COLMOD's bit depth --
+  // the panel accepts 16-bit data over the RGB bus regardless of what its
+  // own COLMOD is set to display internally. An earlier bring-up guess
+  // changed this to 0x50 (RGB565) reasoning from wire count alone; that was
+  // wrong and made no visible difference on real hardware either.
+  st7701Cmd(0x3A); st7701Dat(0x66);
   st7701Cmd(0x36); st7701Dat(0x00);  // MADCTL
   st7701Cmd(0x35); st7701Dat(0x00);  // tearing effect on
   st7701Cmd(0x29);                   // display on
 
-  tca9554Write(EXIO_LCD_CS, true);
+  tca9554Write(EXIO_LCD_CS, true);  // release, activo alto -- confirmado contra ST7701_CS_Dis()
   delay(10);
+
+  Serial.printf("st7701: init done, spi=%s fails=%u\n",
+                 gSt7701Spi ? "ok" : "NULL", gSt7701XferFail);
 
   // Libera el bus SPI2_HOST: el init del ST7701 es lo UNICO que lo necesita
   // (el dibujado normal va por el periferico RGB paralelo, no por aqui). La
@@ -1136,9 +1209,22 @@ void setup() {
 #elif defined(TAMAPOKE_BOARD_28ROUND)
   // NUNCA PROBADO EN PLACA -- ver PORTAGE_28ROUND.md.
   tca9554Begin();
+  // tca9554Begin() deja LOS OCHO pines del expansor en alto (0xFF): correcto
+  // para las lineas de reset/CS que usa esta placa (activo-bajo, alto =
+  // inactivo), pero el EXIO_BUZZER no es una linea de reset -- alto ahi
+  // significa "zumbador encendido". Sin esto suena desde el arranque y no se
+  // apaga nunca, porque ningun otro sitio del firmware toca ese pin (el juego
+  // no tiene concepto de vibracion/zumbador, ver PORTAGE_28ROUND.md).
+  tca9554Write(EXIO_BUZZER, false);
   st7701Init();  // reset + secuencia de registros del ST7701 (CS por el expansor)
   if (!gfx->begin()) Serial.println("gfx->begin() fallo");
-  ledcAttach(LCD_BACKLIGHT, 20000 /*Hz*/, 10 /*bits*/);
+  // 20 kHz sits right at the edge of human hearing -- audible as a thin
+  // whine to plenty of people (worse through a cheap backlight driver's
+  // inductor, which can turn PWM ripple into actual sound). Never verified
+  // on this untested board (see PORTAGE_28ROUND.md); moved to 25 kHz, the
+  // conventional "silent" PWM frequency, comfortably above anyone's hearing
+  // and still well within the LEDC peripheral's range at 10-bit resolution.
+  ledcAttach(LCD_BACKLIGHT, 25000 /*Hz*/, 10 /*bits*/);
   setPanelBrightness(180);
 #endif
 

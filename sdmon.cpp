@@ -6,34 +6,27 @@
 #include <string.h>
 
 #if defined(TAMAPOKE_SD_NATIVE_SDMMC)
-// 1.75: pines propios, protocolo SD nativo (SD_MMC), verificado en placa.
+// 1.75 (pines propios) y 2.8" redonda (bus compartido con el init del LCD,
+// pero protocolo SD_MMC nativo de 1 bit igualmente -- confirmado contra el
+// SD_Card.cpp oficial de Waveshare, ver pin_config.h): protocolo SD nativo.
 #include <SD_MMC.h>
 #define SDCARD SD_MMC
+#if defined(TAMAPOKE_SD_MMC_D3_EXIO)
+#include "tca9554.h"
+#endif
 #else
-// 1.43 (pines propios) y 2.8" redonda (bus compartido con el init del LCD):
-// SD por SPI en ambos casos -- ver sdBegin().
+// 1.43: SD por SPI, pines propios (no SDMMC 4-bit).
 #include <SD.h>
 #include <SPI.h>
 #define SDCARD SD
 #if defined(TAMAPOKE_SD_SPI_DEDICATED)
-// 1.43: pines propios, cableados en SPI dedicado (no SDMMC 4-bit). Bus SPI
+// pines propios, cableados en SPI dedicado (no SDMMC 4-bit). Bus SPI
 // propio (no el mismo que la pantalla) para no compartir cola de
 // transacciones con el framebuffer QSPI. Sintoma cuando esto usaba SD_MMC en
 // vez de SPI: "sdmmc_init_ocr: send_op_cond (1) returned 0x107"
 // (ESP_ERR_TIMEOUT) -- la tarjeta nunca responde al protocolo nativo sobre
 // pines cableados para SPI.
 static SPIClass sdSPI(HSPI);
-#elif defined(TAMAPOKE_SD_SPI_SHARED_LCD)
-// 2.8" redonda, NUNCA PROBADA EN PLACA (ver PORTAGE_28ROUND.md): el esquematico
-// comparte MOSI/SCK con el sub-bus de 3 hilos del init del ST7701 (mismo
-// SPI2_HOST -- ver st7701Init(), que libera el bus con spi_bus_free() al
-// terminar para que esta clase pueda reclamarlo). El CS de la SD va detras
-// del expansor TCA9554 (EXIO_SD_CS), no en un GPIO que SPIClass pueda manejar
-// solo -- se deja PERMANENTEMENTE seleccionado en sdBegin() y se le pasa un
-// numero de pin invalido a SD.begin() para que no intente tocar ningun CS
-// por su cuenta.
-static SPIClass sdSPI(FSPI);
-#include "tca9554.h"
 #endif
 #endif
 
@@ -187,16 +180,19 @@ void sdScanRegionArt(bool verbose) {
 
 bool sdBegin() {
 #if defined(TAMAPOKE_SD_NATIVE_SDMMC)
+#if defined(TAMAPOKE_SD_MMC_D3_EXIO)
+  // 2.8" redonda: D3 no es un CS SPI, es la linea D3 de la tarjeta y va
+  // detras del expansor TCA9554 (EXIO_SD_CS). El SD_Card.cpp oficial la pone
+  // en ALTO (SD_D3_EN) antes de montar -- bajo, como un CS SPI activo-bajo,
+  // es lo que "SD no detectada" reflejaba en todo boot real anterior.
+  tca9554Write(EXIO_SD_CS, true);
+  delay(10);
+#endif
   SDCARD.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_DATA);
   sdReady = SDCARD.begin("/sdcard", true /* modo 1-bit */, true /* formatea si no monta */);
 #elif defined(TAMAPOKE_SD_SPI_DEDICATED)
   sdSPI.begin(SDMMC_CLK, SDMMC_DATA /* MISO */, SDMMC_CMD /* MOSI */, SDMMC_CS);
   sdReady = SDCARD.begin(SDMMC_CS, sdSPI, 4000000, "/sdcard", 5, true /* formatea si no monta */);
-#elif defined(TAMAPOKE_SD_SPI_SHARED_LCD)
-  tca9554Write(EXIO_SD_CS, false);  // seleccionada de forma permanente, ver arriba
-  sdSPI.begin(SDMMC_CLK, SDMMC_DATA /* MISO */, SDMMC_CMD /* MOSI */, -1);
-  sdReady = SDCARD.begin(255 /* CS ya fijo por el expansor, ningun GPIO real */,
-                         sdSPI, 4000000, "/sdcard", 5, true /* formatea si no monta */);
 #endif
   if (sdReady) {
     Serial.printf("SD montada: %llu MB\n", SDCARD.cardSize() / (1024ULL * 1024ULL));

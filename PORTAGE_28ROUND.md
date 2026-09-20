@@ -1,10 +1,99 @@
 # Portage vers la Waveshare ESP32-S3 2.8inch Capacitive Touch Round Display
 
-**JAMAIS TESTE SUR UNE VRAIE CARTE.** Contrairement au portage 1.43 (voir
-`PORTAGE_1.43.md`), personne n'a cette carte sous la main pour flasher et
-corriger par itération. Ce document existe pour que la prochaine personne qui
-en a une sache exactement quoi vérifier en premier, dans quel ordre, et
-pourquoi chaque décision a été prise comme elle l'a été.
+**PREMIER BRING-UP RÉEL FAIT (2026-09-19/20).** L'écran affiche désormais le
+jeu. Contrairement à la première version de ce document, ce n'est plus un
+portage jamais testé -- voir la section "Bring-up réel" plus bas pour ce qui a
+été trouvé et corrigé, et ce qui reste ouvert (l'image "saute" encore par
+moments, cause probablement architecturale, pas un registre à corriger).
+
+## Bring-up réel (2026-09-19/20) -- ce qui a vraiment été corrigé
+
+La demo officielle Waveshare (`ESP32-S3-Touch-LCD-2.8C-Demo.zip`, wiki) a été
+téléchargée et diffée OCTET PAR OCTET contre notre transcription. Plusieurs
+suppositions "raisonnables" faites par lecture de code seule se sont révélées
+fausses ; d'autres corrections tentées en direct sur la carte réelle (en
+l'absence de la source officielle à ce moment-là) étaient des FAUSSES PISTES
+et ont été annulées une fois la vraie source trouvée. Dans l'ordre
+chronologique réel du bring-up (utile pour comprendre pourquoi certains
+commentaires du code semblent se contredire dans l'historique git) :
+
+1. **Écran noir avec juste le rétroéclairage.** Cause réelle : pas de
+   `bounce_buffer_size_px` sur `Arduino_ESP32RGBPanel`. Sans lui, le
+   périphérique RGB fait du DMA directement depuis la PSRAM, dont la latence
+   ne suit pas un pixel clock continu -- piège ESP32-S3 bien documenté.
+   Confirmé identique à l'officiel : `10 * 480` exactement.
+2. **Fausse piste n°1 : polarité du CS de l'expandeur.** En l'absence de la
+   source officielle, changer `EXIO_LCD_CS` d'actif-bas à actif-haut a fait
+   passer l'écran de "franges de couleurs" à "noir uni" -- ce qui semblait
+   confirmer l'hypothèse. **C'était une coïncidence.** La source officielle
+   (`Display_ST7701.cpp`, `ST7701_CS_EN()`) confirme que l'actif-bas
+   d'origine était correct. Annulé.
+3. **Fausse piste n°2 : COLMOD (0x3A).** Changé de `0x66` à `0x50` en
+   supposant qu'il fallait faire correspondre le registre au nombre de lignes
+   de données câblées (16 = RGB565). Sans effet visible à l'époque (parce que
+   le CS était alors invalidé par la fausse piste n°1, donc rien n'atteignait
+   la puce de toute façon). La source officielle confirme `0x66` tel quel,
+   commentaire `// 0x66 / 0x77` inclus. Annulé.
+4. **Fausse piste n°3 : Display Inversion ON (0x21).** Ajoutée en supposant
+   qu'elle manquait à la table transcrite. Absente de la source officielle.
+   Annulée (sans effet mesuré de toute façon).
+5. **La vraie cause des "franges de couleurs" : polarité HSYNC/VSYNC.** En
+   diffant la structure `esp_lcd_rgb_panel_config_t` officielle contre ce que
+   génère réellement `Arduino_ESP32RGBPanel::getFrameBuffer()` : la structure
+   officielle ne renseigne JAMAIS `.timings.flags.hsync_idle_low` /
+   `vsync_idle_low`, donc les deux valent 0 (repos HAUT, actif BAS) par
+   zéro-init du C. Notre appel avec `hsync_polarity=0`/`vsync_polarity=0`
+   faisait calculer par la bibliothèque `hsync_idle_low=1`/`vsync_idle_low=1`
+   -- polarité EXACTEMENT INVERSÉE. Passer `hsync_polarity=1`/
+   `vsync_polarity=1` (pour obtenir `idle_low=0` via la formule ternaire de
+   la bibliothèque) a fait passer l'écran des franges de couleurs à une
+   vraie image du jeu.
+6. **Fréquence pixel : 30 -> 16 MHz.** Même après la correction de polarité,
+   l'image "sautait" (perte de synchro intermittente). Cause probable :
+   `Arduino_ESP32RGBPanel.cpp` fige sa propre source d'horloge RGB LCD
+   (`LCD_CLK_SRC_DEFAULT`/PLL160M) au lieu de `LCD_CLK_SRC_PLL240M` comme la
+   demo officielle -- ce choix n'est pas exposable via le constructeur public
+   de cette bibliothèque externe (non vendue dans ce dépôt). Une source PLL
+   différente peut ne pas offrir de diviseur propre pour 30 MHz. 16 MHz a
+   mesurablement réduit le problème sur la carte réelle ; 12 MHz testé en
+   plus n'a rien amélioré davantage. **Le "saut" résiduel à 16 MHz est
+   probablement le problème architectural suivant, pas un réglage
+   d'horloge supplémentaire à trouver.**
+7. **"SD no detectada" en permanence : mauvais protocole, pas matériel
+   défaillant.** `SD_Card.cpp` officiel utilise `SD_MMC` natif 1-bit
+   (`SD_MMC.setPins(2, 1, 42)` + `SD_MMC.begin("/sdcard", true)`), PAS le SPI
+   comme le code précédent le supposait (`TAMAPOKE_SD_SPI_SHARED_LCD`). Même
+   piège que documenté pour la 1.43 mais à l'envers (la 1.43 doit être en
+   SPI, pas en SD_MMC natif). La ligne EXIO_SD_CS (EXIO_PIN4 côté officiel)
+   n'est pas non plus un CS SPI : c'est la ligne D3 de la carte, mise à
+   HAUT (pas bas) avant le montage (`SD_D3_EN()`). Voir `pin_config.h`
+   (`TAMAPOKE_SD_NATIVE_SDMMC`) et `sdmon.cpp` (`sdBegin()`). **Vérifié sur
+   la carte réelle : `SD montada: 14910 MB`, `miniaturas cargadas: 809`.**
+   Une première carte insérée échouait avec `sdmmc_init_ocr: send_op_cond (1)
+   returned 0x107` (timeout au tout premier échange, avant même la
+   négociation de format) malgré des broches/protocole désormais identiques
+   à l'officiel -- carte défaillante/incompatible, pas un bug logiciel : une
+   deuxième carte a monté du premier coup avec le même firmware, sans aucun
+   changement de code entre les deux essais.
+
+**Ce qui reste ouvert :** l'image "saute" encore par moments à 16 MHz après
+tous ces correctifs. Hypothèse la plus probable, pas encore corrigée : le
+jeu redessine l'écran ENTIER à chaque frame directement dans le framebuffer
+live, sans double buffering (`Arduino_ESP32RGBPanel` fige `num_fbs=1`, non
+exposable sans patcher la bibliothèque externe) ni synchronisation sur le
+VSYNC -- une architecture connue pour produire du tearing visible sous cette
+charge, indépendamment du réglage d'horloge. Corriger cela demanderait soit
+de patcher/vendre une copie de `Arduino_ESP32RGBPanel` avec un vrai double
+buffer, soit de restructurer la boucle de rendu pour n'écrire que pendant le
+blanking (callback `on_vsync`) -- un chantier séparé, pas un réglage rapide.
+
+## Version originale de ce document (avant tout bring-up matériel)
+
+**JAMAIS TESTÉ SUR UNE VRAIE CARTE (historique -- voir plus haut).**
+Contrairement au portage 1.43 (voir `PORTAGE_1.43.md`), personne n'avait
+cette carte sous la main pour flasher et corriger par itération. Cette
+section garde son contenu d'origine tel quel pour l'historique, y compris ce
+qui s'est révélé faux (voir les corrections ci-dessus) :
 
 ## Pourquoi cette carte est différente des deux AMOLED
 
@@ -67,23 +156,19 @@ Dans l'ordre ou les tester (chacun peut invalider les suivants) :
    marcher (ecran, tactile et SD en dependent tous). `tca9554Begin()` imprime
    "TCA9554 no detectado" sur le port serie si l'I2C ne repond pas -- premiere
    chose a chercher au boot.
-2. **L'ecran s'allume-t-il ?** Le protocole SPI a 3 fils du ST7701 (point 2
-   ci-dessus) n'a jamais transite reellement sur un GPIO -- juste transcrit
-   depuis du code source. Si l'ecran reste noir, comparer avec la lecon de la
-   1.43 (`PORTAGE_1.43.md`) : ce n'est presque jamais l'offset ou la
-   polarite, souvent une commande d'init manquante ou mal transcrite.
+2. ~~L'ecran s'allume-t-il ?~~ **Oui, voir le bring-up reel plus haut.** Ni
+   l'offset ni une commande manquante -- la vraie cause etait la polarite
+   HSYNC/VSYNC du peripherique RGB (idle_low inversee par rapport a l'officiel).
 3. **L'adresse I2C du GT911** -- mise a `0x5D` (l'une des deux adresses
    possibles du GT911, choisie selon l'etat d'une de ses propres broches au
    demarrage). Si le tactile ne repond pas, `0x14` est le premier a essayer.
 4. **`setMirrorXY(false, false)`** pour le tactile -- l'orientation du
    montage n'est pas dans le schema, purement une supposition. Si le tactile
    repond a l'envers ou en miroir, c'est la premiere ligne a changer.
-5. **Le CS de la SD reste selectionne en permanence** (voir le commentaire
-   dans `sdmon.cpp`, branche `TAMAPOKE_SD_SPI_SHARED_LCD`) parce que la
-   bibliotheque `SD` d'Arduino attend un GPIO qu'elle peut piloter elle-meme,
-   pas un pin derriere un expandeur I2C. Un pin invalide (255) lui est passe
-   pour qu'elle n'essaie de toucher aucun CS de son cote. Si la SD ne monte
-   jamais, c'est le point le plus suspect.
+5. ~~Le CS de la SD reste selectionne en permanence~~ **FAUX, voir le
+   bring-up reel plus haut.** Ce n'etait pas du SPI du tout -- la carte
+   utilise SD_MMC natif 1-bit, comme la 1.75. `TAMAPOKE_SD_SPI_SHARED_LCD` a
+   ete remplace par `TAMAPOKE_SD_NATIVE_SDMMC`.
 6. **La frequence PCLK (30 MHz) et les timings HSYNC/VSYNC** sont ceux du
    code officiel tels quels -- s'ils donnent une image qui tremble ou
    deforme, c'est un probleme de timing RGB, pas de logique du jeu.
@@ -92,14 +177,35 @@ Dans l'ordre ou les tester (chacun peut invalider les suivants) :
    analogie avec le code officiel, a` ajuster si l'ecran semble trop sombre
    ou clignote.
 
+   **Mis a jour a 25 kHz** apres le tout premier bring-up reel : un "bruit
+   strident" a ete signale des l'installation du firmware. 20 kHz est
+   exactement la limite de l'audition humaine, et un mauvais filtrage du
+   driver de retroeclairage transforme facilement ce ripple PWM en un
+   sifflement audible -- 25 kHz est la frequence "silencieuse" habituelle
+   pour ce genre de driver, toujours largement dans la plage du peripherique
+   LEDC a 10 bits. **Non confirme au multimetre/oscilloscope** -- si le bruit
+   persiste apres ce changement, ce n'etait pas la cause (voir le buzzer
+   ci-dessous, l'autre suspect trouve dans la meme session).
+
 ## Ce qui n'a PAS ete implemente du tout
 
 - **Aucune lecture de l'IMU QMI8658.** Ni cette carte ni les deux AMOLED
   n'exploitent l'IMU dans le jeu (confirme : `IMU_INT` n'est reference nulle
   part hors de `pin_config.h`) -- rien a faire ici specifiquement.
-- **Aucune vibration/buzzer.** L'expandeur a une sortie buzzer
-  (`EXIO_BUZZER`) que ce portage n'utilise pas ; le jeu n'a pas de concept de
-  retour haptique.
+- **Aucune vibration/buzzer utilisee volontairement**, mais **le buzzer
+  physique EST maintenant explicitement coupe au boot.** `tca9554Begin()`
+  met les 8 broches de l'expandeur en sortie ET a l'etat haut (`0xFF`) --
+  correct pour les lignes de reset/CS (actif-bas, haut = inactif) que cette
+  carte utilise, mais `EXIO_BUZZER` n'est PAS une ligne de reset : haut y
+  signifie "buzzer allume". Rien d'autre dans le firmware ne touchait ce pin,
+  donc il restait allume en continu des le premier `tca9554Begin()` et pour
+  toute la session -- correspond exactement au "bruit strident des
+  l'installation du firmware" signale lors du tout premier bring-up.
+  `tca9554Write(EXIO_BUZZER, false)` a ete ajoute juste apres
+  `tca9554Begin()`. **Non confirme sur la carte reelle** -- si le bruit
+  persiste, verifier au multimetre si `EXIO_BUZZER` (TCA9554 P7) est bien a
+  l'etat bas apres boot, et considerer aussi le point 7 ci-dessus (PWM du
+  retroeclairage).
 
 ## Comment tester, etape par etape
 

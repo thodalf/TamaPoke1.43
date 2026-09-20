@@ -54,7 +54,7 @@
 
 // Version del firmware. Subir este numero en cada release (y manifest.json para
 // el instalador web). Se muestra en la pantalla de ajustes y por serie al arrancar.
-#define FW_VERSION "3.23"
+#define FW_VERSION "3.24"
 
 #if defined(TAMAPOKE_DISPLAY_QSPI_AMOLED)
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -2036,9 +2036,22 @@ void partyTap(int16_t x, int16_t y) {
         // The outgoing creature is banked into the SAME slot the incoming
         // one just vacated -- a straight swap, not a release-then-add, so
         // the party's size and the rest of its order never move.
+        //
+        // Bank the outgoing creature BEFORE adopting the incoming one, and
+        // read the incoming one into a local copy first -- Pet and Party
+        // each commit to NVS independently (pet.swapActive() ends in its
+        // own save(), party.replaceAt() in its own), so an external reset
+        // landing between the two calls is not something either object can
+        // see coming. If it lands here, the party slot already holds a
+        // valid creature (the one that was just active) and the live pet
+        // simply hasn't been swapped in yet -- reopening the sheet shows the
+        // swap didn't take, rather than the live pet silently having become
+        // whatever was in this slot while the slot ALSO still shows it (two
+        // copies of the incoming creature, the outgoing one gone for good).
         PartyMon outgoing = pet.snapshot();
-        pet.swapActive(party.slots[partyDetail - 1]);
+        PartyMon incoming = party.slots[partyDetail - 1];
         party.replaceAt(partyDetail - 1, outgoing);
+        pet.swapActive(incoming);
       }
       partyDetail = 0;
       boxSwapFrom = 0;

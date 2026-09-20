@@ -24,8 +24,9 @@
   esp-web-install-button[install-unsupported] { display:none; }
   .unsupported { display:none; color:var(--bad); font-weight:500; }
   .row { display:flex; gap:.75rem; align-items:center; flex-wrap:wrap; }
-  #log { font-family: ui-monospace, monospace; font-size:.85rem; background:#1b1b25; color:#d8dcf0;
+  #log, #consoleLog { font-family: ui-monospace, monospace; font-size:.85rem; background:#1b1b25; color:#d8dcf0;
          border-radius:10px; padding:.75rem 1rem; margin-top:1rem; max-height:220px; overflow:auto; white-space:pre-wrap; display:none; }
+  #consoleCmd { flex:1; min-width:120px; padding:.6rem .8rem; border-radius:10px; border:1px solid var(--ink); font:inherit; }
   .bar { height:10px; background:var(--track); border-radius:5px; overflow:hidden; margin-top:.75rem; display:none; }
   .bar > div { height:100%; width:0; background:var(--ok); transition: width .15s; }
   code { background:#0001; padding:.1em .4em; border-radius:5px; }
@@ -163,6 +164,24 @@
     <p class="note">Close the step-1/step-2 tabs first if they used the same
        port (only one program can talk to the board over USB at a time).</p>
     <pre id="bakLog"></pre>
+  </div>
+
+  <h2 id="consoleStep"><span class="num">4</span>Serial console (for reporting a bug)</h2>
+  <div class="step">
+    <p>A plain terminal to the board's existing serial commands -- useful when
+       reporting something odd, since it is the easiest way to get exact
+       numbers rather than a description. A few useful ones:
+       <code>STATS</code> (the active creature), <code>PARTY</code> (the
+       banked team), <code>HEALTH</code> (uptime/memory). Type one, press
+       Enter or Send, and copy what comes back.</p>
+    <div class="row">
+      <button id="connectConsole">🔌 Connect board</button>
+      <input id="consoleCmd" type="text" placeholder="STATS" disabled>
+      <button id="sendConsole" disabled>Send</button>
+    </div>
+    <p class="note">Already connected via step 2 or step 3 above? This reuses
+       that same connection -- no need to connect twice.</p>
+    <pre id="consoleLog"></pre>
   </div>
 
   <h2>How to play</h2>
@@ -495,6 +514,59 @@ document.getElementById('restoreFile').onchange = async (ev) => {
     bakLog('No response from the board -- check the connection and try again.');
   }
 };
+
+// ---- Step 4: a plain serial console, for typing a debug command (STATS,
+// PARTY, HEALTH...) and getting the exact text back rather than a
+// description of it. Shares the same port/reader/writer as steps 2 and 3 --
+// connecting again here if already connected would try to open a port
+// that's already claimed and fail.
+const conLog = (m) => { const el = document.getElementById('consoleLog'); el.style.display = 'block';
+  el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
+
+document.getElementById('connectConsole').onclick = async () => {
+  try {
+    if (!port) {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200 });
+      reader = port.readable.getReader();
+      writer = port.writable.getWriter();
+      lineBuf = '';
+      pumpReader();   // not awaited: same background pump as the other connect buttons
+    }
+    conLog('Connected.');
+    document.getElementById('consoleCmd').disabled = false;
+    document.getElementById('sendConsole').disabled = false;
+    document.getElementById('connectConsole').disabled = true;
+  } catch (e) { conLog('Could not connect: ' + e.message); }
+};
+
+async function sendConsoleCmd() {
+  const input = document.getElementById('consoleCmd');
+  const cmd = input.value.trim();
+  if (!cmd) return;
+  if (!writer) { conLog('Connect the board first.'); return; }
+  input.value = '';
+  conLog('> ' + cmd);
+  lineBuf = '';   // drop anything left over from an unrelated previous read
+  await writer.write(enc.encode(cmd + '\n'));
+  // Most commands end with a bare "DONE" line -- read until then, or give up
+  // after a few seconds of silence for the ones that don't (or a command
+  // the firmware doesn't recognise, which prints nothing at all).
+  const deadline = Date.now() + 4000;
+  let gotAny = false;
+  while (Date.now() < deadline) {
+    const l = await readLine(Math.min(1500, deadline - Date.now()));
+    if (l === null) break;
+    conLog(l);
+    gotAny = true;
+    if (l === 'DONE') break;
+  }
+  if (!gotAny) conLog('(no response)');
+}
+document.getElementById('sendConsole').onclick = sendConsoleCmd;
+document.getElementById('consoleCmd').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendConsoleCmd();
+});
 </script>
 </body>
 </html>

@@ -54,7 +54,7 @@
 
 // Version del firmware. Subir este numero en cada release (y manifest.json para
 // el instalador web). Se muestra en la pantalla de ajustes y por serie al arrancar.
-#define FW_VERSION "3.22"
+#define FW_VERSION "3.23"
 
 #if defined(TAMAPOKE_DISPLAY_QSPI_AMOLED)
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -923,6 +923,15 @@ static const uint8_t CRACK2[][2] = { {11,13},{12,14},{11,15},{20,12},{19,13},{20
 // estrellas del modo noche
 static const uint16_t STARS[][2] = { {120,140},{330,120},{370,210},{95,230},{280,90},{160,95},
                                      {200,160},{55,110},{410,150},{240,60} };
+// textura del suelo: motas FIJAS (no aleatorias por frame, para que no
+// parpadeen) -- {x, offset bajo HORIZON, clara(1)/oscura(0)} -- da aspecto
+// granulado al terreno en vez de un bloque de color plano.
+static const int16_t GROUND_FLECKS[][3] = {
+  {30,18,0},{95,40,1},{150,14,0},{210,52,1},{265,22,0},{320,44,0},
+  {375,16,1},{420,58,0},{60,70,1},{130,90,0},{200,110,1},{280,95,0},
+  {350,80,1},{410,105,0},{20,130,0},{100,150,1},{190,170,0},{260,145,1},
+  {330,160,0},{400,180,1},
+};
 
 bool wasPressed = false;
 // eleccion de inicial (primera partida): Bulbasaur / Charmander / Squirtle, 3 filas
@@ -2683,12 +2692,15 @@ void drawScene(uint8_t biome, uint32_t now, bool night) {
     gfx->fillCircle(233, HORIZON - 6, 34, sunCol);  // sol poniente
   }
 
-  // mar de la playa: una franja de agua sobre la arena
+  // mar de la playa: degradado de profundidad (mas clara y brillante cerca de
+  // la orilla que en el fondo) en vez de una franja de un solo tono plano
   uint16_t soil = BIOME_SOIL[biome < 6 ? biome : 0];
   if (night) soil = lerp565(soil, C565(0x16, 0x1c, 0x30), 9, 16);
   if (biome == 1) {
-    uint16_t sea = night ? C565(0x1c, 0x34, 0x52) : C565(0x4f, 0x96, 0xc4);
-    gfx->fillRect(0, HORIZON - 26, 466, 26, sea);
+    uint16_t seaDeep = night ? C565(0x12, 0x28, 0x44) : C565(0x2f, 0x76, 0xac);
+    uint16_t seaShallow = night ? C565(0x1c, 0x34, 0x52) : C565(0x6f, 0xb6, 0xdc);
+    for (int i = 0; i < 4; i++)
+      gfx->fillRect(0, HORIZON - 26 + i * 7, 466, 7, lerp565(seaDeep, seaShallow, i, 3));
     for (int i = 0; i < 3; i++) {
       int wy = HORIZON - 22 + i * 7;
       uint16_t fc = night ? C565(0x3a, 0x58, 0x78) : C565(0xbf, 0xe6, 0xf5);
@@ -2697,8 +2709,17 @@ void drawScene(uint8_t biome, uint32_t now, bool night) {
     }
   }
 
-  // suelo
-  gfx->fillRect(0, HORIZON, 466, 466 - HORIZON, soil);
+  // suelo: degradado de perspectiva atmosferica (una bruma del color del
+  // cielo cerca del horizonte, el tono real del bioma en primer plano) en vez
+  // de un bloque de color plano -- da sensacion de profundidad sin gastar mas
+  // que unos pocos fillRect adicionales por frame
+  uint16_t soilHaze = lerp565(soil, bot, 3, 16);
+  int groundH = 466 - HORIZON;
+  for (int i = 0; i < 3; i++) {
+    int by = HORIZON + i * groundH / 3;
+    int bh = groundH / 3 + 1;
+    gfx->fillRect(0, by, 466, bh, lerp565(soilHaze, soil, i, 2));
+  }
 
   // loma lejana: una franja borrosa entre el cielo y la colina principal, para
   // dar profundidad -- solo se ve el filo de arriba, la colina principal la
@@ -2708,6 +2729,14 @@ void drawScene(uint8_t biome, uint32_t now, bool night) {
 
   uint16_t hill = lerp565(soil, night ? C565(0x0c, 0x12, 0x24) : C565(0xff, 0xff, 0xff), 3, 16);
   gfx->fillRoundRect(-60, HORIZON - 14, 586, 60, 30, hill);
+
+  // textura: motas fijas mas claras/oscuras que el suelo, para que lea como
+  // terreno granulado y no como un rectangulo de color -- se dibujan encima
+  // de la colina tambien, asi el propio monticulo queda texturizado
+  uint16_t fleckLight = lerp565(soil, UI_WHITE, 3, 16);
+  uint16_t fleckDark = lerp565(soil, C565(0x10, 0x18, 0x20), night ? 8 : 5, 16);
+  for (auto &fl : GROUND_FLECKS)
+    gfx->fillRect(fl[0], HORIZON + fl[1], 2, 2, fl[2] ? fleckLight : fleckDark);
 
   // detalles del bioma
   uint16_t dk = lerp565(soil, C565(0x10, 0x18, 0x20), night ? 11 : 7, 16);
@@ -3303,9 +3332,18 @@ void renderSack() {
   sackShake *= 0.84f;
   int off = (int)(sackShake * sinf(now * 0.05f));
   int sx = CX + off, top = 86, sy = 150;
+  // sombra en el suelo: ancla el saco al escenario en vez de flotar sobre el
+  int shW = 70 - (int)(fabsf(sackShake) * 0.6f);   // se estrecha un poco al balancearse
+  gfx->fillRoundRect(sx - shW / 2, top + 158, shW, 12, 6, C565(0x10, 0x18, 0x20));
   gfx->fillRect(CX - 3, 56, 6, top - 56, ink);          // gancho/cuerda
   gfx->fillRect(sx - 4, top - 30, 8, 34, ink);          // cadena
-  gfx->fillRoundRect(sx - 42, top, 84, 150, 26, C565(0xb5, 0x3a, 0x3a));  // saco
+  // dos tonos en vez de un rojo plano, para dar volumen sin romper la
+  // silueta redondeada -- una franja clara inset arriba (la luz le da de
+  // frente), el tono base debajo
+  gfx->fillRoundRect(sx - 42, top, 84, 150, 26, C565(0x7e, 0x28, 0x28));
+  gfx->fillRoundRect(sx - 38, top + 4, 76, 90, 22, C565(0xd0, 0x54, 0x54));
+  // brillo de cuero a un lado, para que no lea plano
+  gfx->fillRoundRect(sx - 30, top + 26, 10, 60, 5, lerp565(C565(0xd0, 0x54, 0x54), UI_WHITE, 1, 6));
   gfx->fillRoundRect(sx - 42, top, 84, 22, 18, C565(0x7e, 0x28, 0x28));   // tapa
   gfx->drawRoundRect(sx - 42, top, 84, 150, 26, ink);
   gfx->fillRect(sx - 42, top + 70, 84, 4, C565(0x7e, 0x28, 0x28));        // costura
@@ -3341,14 +3379,29 @@ void drawGameScene() {
   else if (hh < 18){ top = C565(0x8f, 0xc8, 0xea); bot = C565(0xdc, 0xee, 0xe6); }
   else             { top = C565(0xc7, 0x5a, 0x4a); bot = C565(0xf0, 0xae, 0x64); }
   int hor = 376;
-  for (int y = 0; y < hor; y += 8)
-    gfx->fillRect(0, y, 466, 8, lerp565(top, bot, y, hor));
+  for (int y = 0; y < hor; y += 4)
+    gfx->fillRect(0, y, 466, 4, lerp565(top, bot, y, hor));
   if (night)
     for (auto &st : STARS) gfx->fillRect(st[0], st[1], 4, 4, UI_WHITE);
   uint8_t bio = pet.isEgg() ? 0 : DEX_TBL[pet.speciesId].biome;
   uint16_t soil = BIOME_SOIL[bio < 6 ? bio : 0];
   if (night) soil = lerp565(soil, C565(0x16, 0x1c, 0x30), 9, 16);
-  gfx->fillRect(0, hor, 466, 466 - hor, soil);
+  // mismo tratamiento que el fondo principal (drawScene): degradado de
+  // profundidad + textura granulada, para que los minijuegos no lean como un
+  // escenario mas plano que el resto del juego
+  uint16_t soilHaze = lerp565(soil, bot, 3, 16);
+  int groundH = 466 - hor;
+  for (int i = 0; i < 3; i++) {
+    int by = hor + i * groundH / 3;
+    int bh = groundH / 3 + 1;
+    gfx->fillRect(0, by, 466, bh, lerp565(soilHaze, soil, i, 2));
+  }
+  uint16_t fleckLight = lerp565(soil, UI_WHITE, 3, 16);
+  uint16_t fleckDark = lerp565(soil, C565(0x10, 0x18, 0x20), night ? 8 : 5, 16);
+  for (auto &fl : GROUND_FLECKS) {
+    if (fl[1] >= groundH) continue;
+    gfx->fillRect(fl[0], hor + fl[1], 2, 2, fl[2] ? fleckLight : fleckDark);
+  }
 }
 
 void renderGame() {
@@ -5468,6 +5521,10 @@ void renderSpeed() {
   int life = spdLife();
   int r = SPD_R - (int)((uint32_t)SPD_R * age / (life ? life : 1) / 2);
   if (r < 8) r = 8;
+  // halo suave detras del blanco, para que no lea como un circulo plano --
+  // puramente cosmetico, por fuera de r y sin tocar el radio que usa el tap
+  gfx->drawCircle(spdX, spdY, r + 5, C565(0xff, 0xb0, 0x9a));
+  gfx->drawCircle(spdX, spdY, r + 2, C565(0xff, 0x86, 0x6e));
   gfx->fillCircle(spdX, spdY, r, UI_BAR_BAD);
   gfx->fillCircle(spdX, spdY, r * 2 / 3, UI_WHITE);
   gfx->fillCircle(spdX, spdY, r / 3, UI_BAR_BAD);
@@ -5589,9 +5646,14 @@ void renderBerry() {
     berrySpawn();
   }
 
-  // a round body, a highlight and a small leaf -- simple enough to read at speed
+  // a round body, a highlight and a small leaf -- simple enough to read at
+  // speed. Two reds instead of one fake a lit sphere rather than a flat disc:
+  // a darker base circle, a slightly smaller/offset body on top, the
+  // highlight last -- all purely visual, BERRY_R and berryX/by (the hit test)
+  // are untouched.
   int16_t by = berryYNow();
-  gfx->fillCircle(berryX, by, BERRY_R, C565(0xd6, 0x3a, 0x3a));
+  gfx->fillCircle(berryX, by, BERRY_R, C565(0x8a, 0x1e, 0x1e));
+  gfx->fillCircle(berryX - 2, by - 2, BERRY_R - 2, C565(0xd6, 0x3a, 0x3a));
   gfx->fillCircle(berryX - 6, by - 6, 5, C565(0xf0, 0x8a, 0x8a));
   gfx->fillTriangle(berryX, by - BERRY_R, berryX - 8, by - BERRY_R - 10,
                     berryX + 4, by - BERRY_R - 6, C565(0x3a, 0x8a, 0x3a));
@@ -5748,6 +5810,9 @@ void renderQuiz() {
     // drawThumb() centres within an 80px box (GAL_CELL, defined later in the
     // file than this function) -- 80 is written out here rather than forward-
     // referencing that macro.
+    // sombra bajo la silueta, como un pedestal -- ancla el sprite al
+    // escenario en vez de dejarlo flotando sobre el fondo
+    gfx->fillRoundRect(CX - 34, 194, 68, 10, 5, C565(0x10, 0x18, 0x20));
     drawThumb(th, CX - 80, 116, 4, true);   // always a silhouette: that IS the question
   } else {
     gfx->setTextColor(ink);

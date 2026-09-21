@@ -76,16 +76,42 @@ commentaires du code semblent se contredire dans l'historique git) :
    deuxième carte a monté du premier coup avec le même firmware, sans aucun
    changement de code entre les deux essais.
 
-**Ce qui reste ouvert :** l'image "saute" encore par moments à 16 MHz après
-tous ces correctifs. Hypothèse la plus probable, pas encore corrigée : le
-jeu redessine l'écran ENTIER à chaque frame directement dans le framebuffer
-live, sans double buffering (`Arduino_ESP32RGBPanel` fige `num_fbs=1`, non
-exposable sans patcher la bibliothèque externe) ni synchronisation sur le
-VSYNC -- une architecture connue pour produire du tearing visible sous cette
-charge, indépendamment du réglage d'horloge. Corriger cela demanderait soit
-de patcher/vendre une copie de `Arduino_ESP32RGBPanel` avec un vrai double
-buffer, soit de restructurer la boucle de rendu pour n'écrire que pendant le
-blanking (callback `on_vsync`) -- un chantier séparé, pas un réglage rapide.
+8. **Tearing général corrigé : `Arduino_Canvas`.** `gfx` enveloppe désormais
+   `Arduino_RGB_Display` dans un `Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT,
+   rgbDisplay)` -- exactement l'architecture déjà utilisée par les cartes
+   1.75/1.43. Le jeu composait chaque image DIRECTEMENT dans le framebuffer
+   live scanné en continu par le périphérique RGB ; chaque appel de dessin
+   était donc visible en cours de composition (le "saut" général). Le Canvas
+   compose hors-écran dans un tampon PSRAM séparé, et `gfx->flush()` (déjà
+   appelé partout dans le code) fait maintenant UN SEUL blit complet via
+   `Arduino_RGB_Display::draw16bitRGBBitmap()`. Ceci a nettement amélioré la
+   stabilité générale sur la carte réelle.
+9. **Réglage d'horloge : plateau atteint entre 8 et 10 MHz.** Avec le Canvas
+   en place, descendre la fréquence a continué d'aider (10 MHz mieux que
+   16 MHz), mais 8 MHz n'a apporté AUCUNE amélioration supplémentaire par
+   rapport à 10 MHz sur la carte réelle -- ce n'est pas un curseur qui va à
+   zéro. Réglé sur 10 MHz (meilleur taux de rafraîchissement pour un
+   résultat identique à 8 MHz).
+
+**Ce qui reste ouvert :** même après le Canvas et le plateau d'horloge à
+10 MHz, un artefact visuel localisé et RÉPÉTABLE persiste **spécifiquement
+sur le bord droit et le bord bas** de l'écran, et semble s'aggraver après
+certaines actions. Sa persistance IDENTIQUE de 8 à 30 MHz (une fois le
+Canvas en place) suggère que ce n'est peut-être pas un pur probleme
+d'horloge marginale -- si ça l'était, on s'attendrait à une variation avec
+la frequence, pas un résultat identique. Hypothèses non testées :
+- Les valeurs de porches HSYNC/VSYNC ont été vérifiées NUMÉRIQUEMENT contre
+  la démo officielle (mêmes chiffres), mais jamais contre le datasheet du
+  panneau lui-même -- il est possible que cette révision précise du panneau
+  ait besoin de valeurs différentes de celles de la démo (calibrées pour un
+  lot différent), ce qui pourrait expliquer une déviation localisée
+  bord-par-bord plutôt qu'un decalage uniforme de l'image entière.
+- Écrire un pilote RGB personnalisé contournant entièrement `Arduino_GFX`
+  (via l'API `esp_lcd_rgb_panel` directement) permettrait de choisir
+  `LCD_CLK_SRC_PLL240M` comme l'officiel, d'ajuster les porches librement,
+  et éventuellement d'ajouter un vrai double buffer matériel (`num_fbs=2`
+  avec bascule au VSYNC) -- un chantier separe et substantiel, pas un
+  réglage rapide.
 
 ## Version originale de ce document (avant tout bring-up matériel)
 

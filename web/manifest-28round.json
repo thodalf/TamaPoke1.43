@@ -1,6 +1,6 @@
 {
-  "name": "TamaPoke (Waveshare ESP32-S3 2.8inch Round Touch, EXPERIMENTAL/UNTESTED)",
-  "version": "3.25",
+  "name": "TamaPoke (Waveshare ESP32-S3 2.8inch Round Touch, EXPERIMENTAL -- known display glitch, see PORTAGE_28ROUND.md)",
+  "version": "3.26",
   "new_install_prompt_erase": true,
   "builds": [
     {

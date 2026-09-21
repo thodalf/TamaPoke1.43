@@ -54,7 +54,7 @@
 
 // Version del firmware. Subir este numero en cada release (y manifest.json para
 // el instalador web). Se muestra en la pantalla de ajustes y por serie al arrancar.
-#define FW_VERSION "3.25"
+#define FW_VERSION "3.26"
 
 #if defined(TAMAPOKE_DISPLAY_QSPI_AMOLED)
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -115,25 +115,38 @@ Arduino_ESP32RGBPanel *rgbBus = new Arduino_ESP32RGBPanel(
   LCD_B0, LCD_B1, LCD_B2, LCD_B3, LCD_B4,
   1 /*hsync_polarity*/, 50 /*hsync_front_porch*/, 8 /*hsync_pulse_width*/, 10 /*hsync_back_porch*/,
   1 /*vsync_polarity*/, 8 /*vsync_front_porch*/, 2 /*vsync_pulse_width*/, 18 /*vsync_back_porch*/,
-  0 /*pclk_active_neg*/, 16000000 /*prefer_speed*/, false /*useBigEndian*/,
+  0 /*pclk_active_neg*/, 10000000 /*prefer_speed*/, false /*useBigEndian*/,
   0 /*de_idle_high*/, 0 /*pclk_idle_high*/, 10 * LCD_WIDTH /*bounce_buffer_size_px*/);
 // Bounce buffer reverted to 10 lines (the confirmed-official value) after 40
 // made the visible "jumping" WORSE on real hardware, not better -- so a
 // bigger staging buffer was not the lever for this.
 //
-// pclk dropped 30MHz -> 16MHz: Arduino_ESP32RGBPanel hardcodes its RGB LCD
-// clk_src (LCD_CLK_SRC_DEFAULT/PLL160M) rather than the official demo's
+// pclk: Arduino_ESP32RGBPanel hardcodes its RGB LCD clk_src
+// (LCD_CLK_SRC_DEFAULT/PLL160M) rather than the official demo's
 // LCD_CLK_SRC_PLL240M, and that's not overridable through this library's
-// public constructor. A different source PLL means 30MHz may not land on an
-// achievable clean divider, and a marginal pixel clock is a well-known cause
-// of intermittent frame-sync loss (looks like the image "jumping") on
-// ESP32-S3 RGB panels, as opposed to the earlier, stably-WRONG striped
-// pattern from the sync-polarity bug. 16MHz measurably reduced the jumping
-// on real hardware versus 30MHz; 12MHz was also tried and made no further
-// difference, so the remaining residual instability is very likely the
-// separate, architectural single-framebuffer-tearing issue documented in
-// PORTAGE_28ROUND.md, not further clock tuning. 16MHz is a much more commonly used,
-// conservative value for 480x480 ST7701 RGB panels in this class of board.
+// public constructor. A different source PLL means the requested frequency
+// may not land on an achievable clean divider, and a marginal pixel clock
+// is a well-known cause of intermittent frame-sync loss on ESP32-S3 RGB
+// panels. 30MHz gave stably-WRONG colored stripes (fixed separately, sync
+// polarity); once that was fixed, 30MHz caused visible "jumping" instead;
+// 16MHz measurably reduced it but real hardware still showed edge cropping
+// that grows after certain actions -- classic symptom of a sync lock that
+// is close but not solid, not the (now separately fixed, see Arduino_Canvas
+// below) single-framebuffer tearing. 12MHz alone made no further difference
+// tested before the Canvas fix landed. WITH the Canvas fix, lower keeps
+// measurably helping: 10MHz was better than 16MHz (still some shift, but
+// less). 8MHz was also tried and made NO further difference versus 10MHz on
+// real hardware -- clock tuning has plateaued, this is not a dial that goes
+// to zero. Settled on 10MHz: same visible result as 8MHz, better refresh
+// rate. The residual artifact (always the right/bottom edge specifically,
+// not random) surviving identically across 8-30MHz suggests it may not
+// purely be a marginal-clock problem after all -- see PORTAGE_28ROUND.md.
+// The achievable-divider theory above may not be the whole story; a custom
+// RGB driver bypassing this library's clk_src (and re-checking porches
+// against the panel's own datasheet rather than just the official demo's
+// values, which were only cross-checked numerically, not against what this
+// specific panel revision actually needs) would be the next real lever, not
+// further clock tuning.
 // bus=nullptr, rst=GFX_NOT_DEFINED, init_operations=nullptr: el reset y el
 // init del ST7701 se hacen a mano (RESET/CS via el expansor TCA9554) ANTES de
 // gfx->begin(), asi que Arduino_RGB_Display no debe tocar ninguno de los dos.
@@ -1303,6 +1316,32 @@ void setup() {
 
   party.begin();
   pet.begin();
+  // Self-heal a duplicate left by an interrupted reviveFrom()/swapActive():
+  // pet.reviveFrom(party.slots[i]) and the party.releaseAt(i)/replaceAt(i)
+  // that is meant to follow it are two SEPARATE NVS commits (Pet and Party
+  // each own their save()), so an external reset landing between them can
+  // leave the live pet and a party slot as two copies of the SAME
+  // individual. IVs are the identifier to key on, not moves: a real
+  // duplicate is exactly one individual that kept living (and learning new
+  // moves) after the split, versus a frozen copy stuck with whatever it
+  // knew at that moment -- checking moves would refuse to match on the very
+  // divergence the bug produces. IVs are fixed at hatch and never change,
+  // so dex + all four matching is not something a real second capture/hatch
+  // could produce by chance (roughly 1 in 24^4); it is the signature of
+  // this interruption, and losing the SPARE copy is the only sane repair.
+  if (!pet.isEgg()) {
+    PartyMon live = pet.snapshot();
+    for (uint8_t i = 0; i < PARTY_SLOTS; i++) {
+      PartyMon &p = party.slots[i];
+      if (p.empty() || p.dex != live.dex) continue;
+      if (p.ivAtk != live.ivAtk || p.ivDef != live.ivDef ||
+          p.ivSpe != live.ivSpe || p.ivHp != live.ivHp) continue;
+      Serial.printf("party slot %u duplicated the live pet (dex %d) -- "
+                    "clearing the stale copy left by an interrupted swap\n",
+                    i, (int)live.dex);
+      party.releaseAt(i);
+    }
+  }
   sdBegin();
   thumbs.load();
 

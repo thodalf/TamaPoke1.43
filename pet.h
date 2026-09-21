@@ -44,9 +44,13 @@ enum : uint8_t { SLEEP_NONE = 0, SLEEP_AUTO, SLEEP_PLAYER };
 #define EXPED_ITEMS_15 2
 #define EXPED_ITEMS_30 4
 #define EXPED_ITEMS_60 7
-#define EXPED_PCT_POTION 65
-#define EXPED_PCT_POKEBALL 30
-// remaining 5% -> masterball, see rollLootItem()
+#define EXPED_PCT_POTION 40
+#define EXPED_PCT_POKEBALL 45
+// remaining 15% -> masterball, see rollLootItem() -- tripled from 5%. Potion
+// at 65% made expeditions feel like a one-item table in practice; pokeball
+// is now the single most common drop (useful, since capture consumes them)
+// and masterball is common enough to actually show up over a normal play
+// session instead of reading as a rounding error.
 
 // Inventory items. Same three IDs feed both an expedition's loot roll and a
 // battle win's loot roll (rollLootItem()), so there is one weighted table

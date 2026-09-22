@@ -4,13 +4,17 @@
 //   - Waveshare ESP32-S3-Touch-AMOLED-1.75  (CO5300 QSPI, CST9217, AXP2101, ES8311)
 //   - Waveshare ESP32-S3-Touch-AMOLED-1.43  (SH8601 QSPI, FT3168, sin PMU, sin audio)
 //   - Waveshare ESP32-S3-Touch-LCD-2.8C     (ST7701 RGB565, GT911, expansor TCA9554)
-//     NUNCA PROBADO EN PLACA -- ver PORTAGE_28ROUND.md.
+//     Bring-up real hecho -- ver PORTAGE_28ROUND.md para el historial completo
+//     y el artefacto visual que sigue abierto.
 // Cada una tiene su pin_config.h propio (ver ese archivo) y sus diferencias de
 // controlador se resuelven aqui abajo con #if TAMAPOKE_BOARD_*.
 //
 // Librerias (Library Manager o repo de Waveshare):
-//   - "GFX Library for Arduino" (moononournation) -- CO5300/SH8601 QSPI y,
-//     para la 2.8C, Arduino_ESP32RGBPanel + Arduino_RGB_Display
+//   - "GFX Library for Arduino" (moononournation) -- CO5300/SH8601 QSPI, y
+//     Arduino_Canvas (generica) para las tres placas. La 2.8C empuja pixeles
+//     con TamaRgbPanel (rgb28round.h/.cpp), un driver propio de este
+//     repositorio, no Arduino_ESP32RGBPanel/Arduino_RGB_Display de la
+//     biblioteca -- ver rgb28round.h para el porque.
 //   - "SensorLib" (Lewis He) -- touch CST92xx/FT6X36/GT911, IMU e RTC
 //
 // Placa: ESP32S3 Dev Module | Flash 16MB | PSRAM: OPI PSRAM | USB CDC On Boot: Enabled
@@ -22,6 +26,18 @@
 #include <Preferences.h>
 #include "Arduino_GFX_Library.h"
 #include "pin_config.h"
+// Centro de la pantalla redonda, derivado del panel de CADA placa en vez de
+// fijo en 233 -- 233 es exactamente LCD_WIDTH/2 para 1.75/1.43 (466x466),
+// asi que esto no cambia nada ahi, pero corrige la 2.8 redonda (480x480,
+// centro real 240) sin tocar los otros dos. Definido AQUI, antes de
+// pin_config.h... espera, DESPUES de pin_config.h (LCD_WIDTH/HEIGHT vienen de
+// ahi) y antes de cualquier uso: la version anterior vivia a mitad de fichero
+// y dejaba varios usos tempranos (como beh.x mas abajo) leyendo el 233 literal
+// que tenian escrito a mano, no esta macro -- exactamente el motivo por el
+// que "decorado descentrado en la 2.8 redonda" parecia un bug de temporizacion
+// de pantalla durante toda esta sesion de bring-up y en realidad era esto.
+#define CX (LCD_WIDTH / 2)
+#define CY (LCD_HEIGHT / 2)
 #if defined(TAMAPOKE_BOARD_175)
 #include "TouchDrvCSTXXX.hpp"     // CST9217
 #elif defined(TAMAPOKE_BOARD_143)
@@ -30,6 +46,7 @@
 #include "TouchDrvGT911.hpp"
 #include "tca9554.h"              // expansor I2C: LCD_RESET/LCD_CS/TP_RESET/SD_CS
 #include "driver/spi_master.h"    // sub-bus de 3 hilos para el init del ST7701
+#include "rgb28round.h"           // driver RGB propio, ver su cabecera para el porque
 #endif
 #include "species.h"
 #include "dex.h"
@@ -54,7 +71,7 @@
 
 // Version del firmware. Subir este numero en cada release (y manifest.json para
 // el instalador web). Se muestra en la pantalla de ajustes y por serie al arrancar.
-#define FW_VERSION "3.26"
+#define FW_VERSION "3.27"
 
 #if defined(TAMAPOKE_DISPLAY_QSPI_AMOLED)
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -86,88 +103,59 @@ TouchDrvFT6X36 touch;
 #endif
 
 #elif defined(TAMAPOKE_DISPLAY_RGB_ST7701)
-// PORTAGE 2.8" redonda -- NUNCA PROBADO EN PLACA, ver PORTAGE_28ROUND.md.
-// Panel RGB565 paralelo: no hay bus QSPI ni clase Arduino_GFX especifica de
-// ST7701. El init del chip (registros, no pixeles) se manda a mano en setup()
-// por un sub-bus SPI de 3 hilos propio (ver st7701InitSequence() mas abajo);
-// Arduino_ESP32RGBPanel + Arduino_RGB_Display solo se ocupan de empujar
+// PORTAGE 2.8" redonda -- ver PORTAGE_28ROUND.md para el historial completo
+// del bring-up. Panel RGB565 paralelo: no hay bus QSPI. El init del chip
+// (registros, no pixeles) se manda a mano en setup() por un sub-bus SPI de
+// 3 hilos propio (ver st7701Init() mas abajo); lo de aqui solo empuja
 // pixeles una vez el panel ya esta inicializado.
-// bounce_buffer_size_px: without it, the RGB peripheral DMAs straight out of
-// PSRAM, whose access latency can't keep up with a continuous 30MHz pixel
-// clock -- a well-documented ESP32-S3 RGB-LCD trap where the panel never
-// gets a stable frame at all (blank/no image, not just tearing), rather than
-// a merely cosmetic glitch. 10 lines of SRAM bounce buffer, matching a
-// confirmed-working independent ST7701/480-wide config for this same chip.
-// hsync_polarity/vsync_polarity=1 (not 0): confirmed by diffing against the
-// official esp_lcd_rgb_panel_config_t in Waveshare's own Display_ST7701.cpp
-// (Demo.zip). That struct never sets .timings.flags.hsync_idle_low/
-// vsync_idle_low at all, so both are 0 (idle HIGH, active LOW) by C
-// zero-init. Arduino_ESP32RGBPanel::getFrameBuffer() computes
-// hsync_idle_low = (hsync_polarity==0) ? 1 : 0 -- passing 0 here (as this
-// code did originally) requests idle_low=1, the OPPOSITE polarity from the
-// official config, even though the numeric porch widths/pulses all matched.
-// A flipped sync polarity is consistent with what real hardware showed:
-// colored stripes rather than a properly framed (even if miscolored) image.
-Arduino_ESP32RGBPanel *rgbBus = new Arduino_ESP32RGBPanel(
+//
+// TamaRgbPanel (rgb28round.h/.cpp) es un driver propio, NO
+// Arduino_ESP32RGBPanel de la biblioteca externa. Motivo: esa clase fija su
+// clk_src interno a LCD_CLK_SRC_DEFAULT/PLL160M sin exponerlo por su
+// constructor, mientras que la demo oficial de Waveshare para este panel
+// exacto (Display_ST7701.cpp, confirmado bajando el Demo.zip real -- ver
+// PORTAGE_28ROUND.md) usa LCD_CLK_SRC_PLL240M. Probar 30/16/12/10/8 MHz
+// contra PLL160M dejo el MISMO artefacto residual en el borde derecho/
+// inferior en los cinco casos -- consistente con que la fuente de reloj en
+// si sea el problema, no la frecuencia pedida. TamaRgbPanel llama a
+// esp_lcd_new_rgb_panel() directamente para poder pedir PLL240M de verdad.
+//
+// bounce_buffer_size_px: sin esto el periferico RGB hace DMA directo desde
+// PSRAM, cuya latencia no sigue un pixel clock continuo -- trampa conocida
+// de ESP32-S3 que deja el panel sin imagen estable (pantalla en negro, no
+// solo tearing). 10 lineas, igual que la demo oficial.
+TamaRgbPanel *rgbDisplay = new TamaRgbPanel(
+  LCD_WIDTH, LCD_HEIGHT,
   LCD_DE, LCD_VSYNC, LCD_HSYNC, LCD_PCLK,
   LCD_R0, LCD_R1, LCD_R2, LCD_R3, LCD_R4,
   LCD_G0, LCD_G1, LCD_G2, LCD_G3, LCD_G4, LCD_G5,
   LCD_B0, LCD_B1, LCD_B2, LCD_B3, LCD_B4,
   1 /*hsync_polarity*/, 50 /*hsync_front_porch*/, 8 /*hsync_pulse_width*/, 10 /*hsync_back_porch*/,
   1 /*vsync_polarity*/, 8 /*vsync_front_porch*/, 2 /*vsync_pulse_width*/, 18 /*vsync_back_porch*/,
-  0 /*pclk_active_neg*/, 10000000 /*prefer_speed*/, false /*useBigEndian*/,
-  0 /*de_idle_high*/, 0 /*pclk_idle_high*/, 10 * LCD_WIDTH /*bounce_buffer_size_px*/);
-// Bounce buffer reverted to 10 lines (the confirmed-official value) after 40
-// made the visible "jumping" WORSE on real hardware, not better -- so a
-// bigger staging buffer was not the lever for this.
+  1 /*pclk_active_neg*/, 10000000 /*pclk_hz*/, 10 * LCD_WIDTH /*bounce_buffer_size_px*/);
+// hsync_polarity/vsync_polarity=1 (not 0): confirmed by diffing against the
+// official esp_lcd_rgb_panel_config_t -- it never sets hsync_idle_low/
+// vsync_idle_low, so both are 0 (idle HIGH, active LOW) by C zero-init.
+// TamaRgbPanel::begin() computes hsync_idle_low = (polarity==0) ? 1 : 0, so
+// polarity=1 is what actually requests idle_low=0 to match.
 //
-// pclk: Arduino_ESP32RGBPanel hardcodes its RGB LCD clk_src
-// (LCD_CLK_SRC_DEFAULT/PLL160M) rather than the official demo's
-// LCD_CLK_SRC_PLL240M, and that's not overridable through this library's
-// public constructor. A different source PLL means the requested frequency
-// may not land on an achievable clean divider, and a marginal pixel clock
-// is a well-known cause of intermittent frame-sync loss on ESP32-S3 RGB
-// panels. 30MHz gave stably-WRONG colored stripes (fixed separately, sync
-// polarity); once that was fixed, 30MHz caused visible "jumping" instead;
-// 16MHz measurably reduced it but real hardware still showed edge cropping
-// that grows after certain actions -- classic symptom of a sync lock that
-// is close but not solid, not the (now separately fixed, see Arduino_Canvas
-// below) single-framebuffer tearing. 12MHz alone made no further difference
-// tested before the Canvas fix landed. WITH the Canvas fix, lower keeps
-// measurably helping: 10MHz was better than 16MHz (still some shift, but
-// less). 8MHz was also tried and made NO further difference versus 10MHz on
-// real hardware -- clock tuning has plateaued, this is not a dial that goes
-// to zero. Settled on 10MHz: same visible result as 8MHz, better refresh
-// rate. The residual artifact (always the right/bottom edge specifically,
-// not random) surviving identically across 8-30MHz suggests it may not
-// purely be a marginal-clock problem after all -- see PORTAGE_28ROUND.md.
-// The achievable-divider theory above may not be the whole story; a custom
-// RGB driver bypassing this library's clk_src (and re-checking porches
-// against the panel's own datasheet rather than just the official demo's
-// values, which were only cross-checked numerically, not against what this
-// specific panel revision actually needs) would be the next real lever, not
-// further clock tuning.
-// bus=nullptr, rst=GFX_NOT_DEFINED, init_operations=nullptr: el reset y el
-// init del ST7701 se hacen a mano (RESET/CS via el expansor TCA9554) ANTES de
-// gfx->begin(), asi que Arduino_RGB_Display no debe tocar ninguno de los dos.
-Arduino_GFX *rgbDisplay = new Arduino_RGB_Display(
-  LCD_WIDTH, LCD_HEIGHT, rgbBus, 0 /*rotation*/, true /*auto_flush*/,
-  nullptr, GFX_NOT_DEFINED, nullptr, 0);
+// pclk_active_neg=1 (not 0): switching this driver to a real
+// LCD_CLK_SRC_PLL240M (the whole reason TamaRgbPanel exists) made NO
+// difference to the residual right/bottom-edge artifact on real hardware --
+// ruling out the clock SOURCE theory entirely, not just the frequency.
+// pclk_active_neg controls which PCLK edge the panel latches RGB data on;
+// a mismatch here is a distinct, well-known ST7701/RGB-panel issue from
+// sync polarity, and one this session had not yet tried. If flipping it
+// doesn't help either, see PORTAGE_28ROUND.md for what's left to check
+// (the panel's own datasheet timings, not just the official demo's).
+//
 // Wrapped in a Canvas, the same architecture the 1.75/1.43 boards already
-// use (Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, panel) above) -- NOT a
-// cosmetic match, a real fix. Without it, `gfx` WAS the live framebuffer the
-// RGB peripheral continuously scans out, so every one of the game's many
-// per-frame draw calls was visible mid-composition: real hardware showed
-// this as the screen "jumping". A Canvas composes the whole frame into its
-// OWN separate PSRAM buffer -- invisible to the panel, nothing reads it
-// concurrently -- and gfx->flush() (already called after every screen render
-// throughout the sketch; flush_test already asserts every screen does this)
-// now does exactly one bulk Arduino_RGB_Display::draw16bitRGBBitmap() call
-// to push the finished frame, instead of being a no-op it was previously
-// (auto_flush=true already handled cache write-back per pixel, so a bare
-// Arduino_RGB_Display's own flush() had nothing left to do). One contiguous
-// 450 KB copy is a far smaller tear window than the whole render loop
-// spread across many separate primitive draws with logic interleaved.
+// use. The game draws into the Canvas's own off-screen PSRAM buffer, never
+// into the live panel framebuffer directly, and gfx->flush() (already
+// called after every screen render throughout the sketch) does exactly one
+// bulk TamaRgbPanel::draw16bitRGBBitmap() call -- a single contiguous copy,
+// a far smaller tear window than the whole render loop spread across many
+// separate primitive draws with logic interleaved.
 Arduino_GFX *gfx = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, rgbDisplay);
 
 TouchDrvGT911 touch;
@@ -354,7 +342,7 @@ struct {
   uint8_t act = PMD_IDLE;
   uint32_t t0 = 0;      // inicio de la animacion en curso
   uint32_t until = 0;   // fin del estado actual
-  float x = 233, targetX = 233;
+  float x = CX, targetX = CX;
 } beh;
 #define PET_GROUND 304  // linea de suelo de la mascota
 PmdMon galleryPmd;  // sprite grande de la vista detalle de la galeria (PMD/TPK2, legal)
@@ -713,7 +701,7 @@ uint8_t btlMyAct = 0;        // host: our own action, latched until theirs lands
 // The LAN battle button on the gym region chooser.
 #define LANBTN_W 190
 #define LANBTN_H UI_TAP_MIN
-#define LANBTN_X (233 - LANBTN_W / 2)
+#define LANBTN_X (CX - LANBTN_W / 2)
 #define LANBTN_Y 336
 
 #define BOXBTN_X 146
@@ -766,7 +754,7 @@ uint8_t btlMyAct = 0;        // host: our own action, latched until theirs lands
 #define PDET_L_W 180
 #define PDET_R_X 266
 #define PDET_R_W 120
-static_assert(PDET_L_X < 233 && 233 < PDET_L_X + PDET_L_W,
+static_assert(PDET_L_X < CX && CX < PDET_L_X + PDET_L_W,
               "the panel centre must land on the sheet's PRIMARY button, not between the two");
 static_assert(PDET_R_X > PDET_L_X + PDET_L_W + 8,
               "the destructive button needs a real dead gap before it");
@@ -819,8 +807,8 @@ uint8_t pickPage = 0;
 // swipe, which is invisible -- the same complaint as everywhere else.
 #define PICK_BTN_W 155
 #define PICK_BTN_H UI_TAP_MIN
-#define PICK_BACK_X (233 - PICK_BTN_W - 7)
-#define PICK_GO_X (233 + 7)
+#define PICK_BACK_X (CX - PICK_BTN_W - 7)
+#define PICK_GO_X (CX + 7)
 bool playerOpen = false;
 // One badge page per gym region, then the medals. Three ladders will not fit on
 // one page, and the page you are on IS the region -- no extra control needed,
@@ -917,7 +905,7 @@ uint8_t btlMsgCount = 0;   // queued lines; a tap shows the next
 #define GYMDIF_H UI_TAP_MIN
 #define BTL_BACK_W 190
 #define BTL_BACK_H UI_TAP_MIN
-#define BTL_BACK_X (233 - BTL_BACK_W / 2)
+#define BTL_BACK_X (CX - BTL_BACK_W / 2)
 #define BTL_BACK_Y 384
 #define BTL_HIT_X0(i) (BTL_CELL_X(i) - BTL_HIT_PAD)
 // The far edges stop one pixel short so the four boxes TILE: the gap between
@@ -966,8 +954,7 @@ int flashIdxForDex(int16_t dex) {
   return (dex >= 1 && dex <= 9) ? IDX[dex] : -1;
 }
 
-#define CX 233  // centro de la pantalla redonda
-#define CY 233
+// CX/CY: ver la definicion junto a pin_config.h, arriba del todo del fichero.
 #define PET_CY 202  // centro vertical del sprite
 
 static const uint16_t INK_K = 0x18C4;  // spriteColor('k')
@@ -1370,7 +1357,7 @@ void ensureMon() {
   monShinyFor = pet.shiny;
   mon.unload();
   pmd.unload();
-  beh.x = beh.targetX = 233;
+  beh.x = beh.targetX = CX;
   beh.mode = 0;
   beh.until = 0;
   if (pet.speciesId >= 1 && pet.speciesId <= DEX_COUNT) {
@@ -2807,7 +2794,7 @@ void drawScene(uint8_t biome, uint32_t now, bool night) {
 
   // cielo en bandas -- 4px en vez de 8 para un degradado mas suave
   for (int y = 0; y < HORIZON; y += 4)
-    gfx->fillRect(0, y, 466, 4, lerp565(top, bot, y, HORIZON));
+    gfx->fillRect(0, y, LCD_WIDTH, 4, lerp565(top, bot, y, HORIZON));
 
   // sol o luna, con un halo suave detras para que no se vea un disco plano
   if (night) {
@@ -2826,8 +2813,8 @@ void drawScene(uint8_t biome, uint32_t now, bool night) {
   } else {
     uint16_t sunCol = C565(0xff, 0xf1, 0xc8);
     for (int r = 40; r >= 36; r -= 4)
-      gfx->drawCircle(233, HORIZON - 6, r, lerp565(bot, sunCol, 40 - r, 8));
-    gfx->fillCircle(233, HORIZON - 6, 34, sunCol);  // sol poniente
+      gfx->drawCircle(CX, HORIZON - 6, r, lerp565(bot, sunCol, 40 - r, 8));
+    gfx->fillCircle(CX, HORIZON - 6, 34, sunCol);  // sol poniente
   }
 
   // mar de la playa: degradado de profundidad (mas clara y brillante cerca de
@@ -2838,7 +2825,7 @@ void drawScene(uint8_t biome, uint32_t now, bool night) {
     uint16_t seaDeep = night ? C565(0x12, 0x28, 0x44) : C565(0x2f, 0x76, 0xac);
     uint16_t seaShallow = night ? C565(0x1c, 0x34, 0x52) : C565(0x6f, 0xb6, 0xdc);
     for (int i = 0; i < 4; i++)
-      gfx->fillRect(0, HORIZON - 26 + i * 7, 466, 7, lerp565(seaDeep, seaShallow, i, 3));
+      gfx->fillRect(0, HORIZON - 26 + i * 7, LCD_WIDTH, 7, lerp565(seaDeep, seaShallow, i, 3));
     for (int i = 0; i < 3; i++) {
       int wy = HORIZON - 22 + i * 7;
       uint16_t fc = night ? C565(0x3a, 0x58, 0x78) : C565(0xbf, 0xe6, 0xf5);
@@ -2852,11 +2839,11 @@ void drawScene(uint8_t biome, uint32_t now, bool night) {
   // de un bloque de color plano -- da sensacion de profundidad sin gastar mas
   // que unos pocos fillRect adicionales por frame
   uint16_t soilHaze = lerp565(soil, bot, 3, 16);
-  int groundH = 466 - HORIZON;
+  int groundH = LCD_HEIGHT - HORIZON;
   for (int i = 0; i < 3; i++) {
     int by = HORIZON + i * groundH / 3;
     int bh = groundH / 3 + 1;
-    gfx->fillRect(0, by, 466, bh, lerp565(soilHaze, soil, i, 2));
+    gfx->fillRect(0, by, LCD_WIDTH, bh, lerp565(soilHaze, soil, i, 2));
   }
 
   // loma lejana: una franja borrosa entre el cielo y la colina principal, para
@@ -2907,7 +2894,7 @@ void drawScene(uint8_t biome, uint32_t now, bool night) {
       gfx->fillRect(50 + c * 68, HORIZON - 16, 10, 3, UI_WHITE);
     if (!night)
       for (int f = 0; f < 10; f++) {
-        int fx = (f * 53 + now / 40) % 466;
+        int fx = (f * 53 + now / 40) % LCD_WIDTH;
         int fy = (f * 90 + now / 18) % HORIZON;
         gfx->fillRect(fx, fy, 3, 3, UI_WHITE);
       }
@@ -3160,7 +3147,7 @@ void render() {
     }
     char reg[24];
     snprintf(reg, sizeof(reg), T(S_POKEDEX_FMT), pet.registeredCount(), DEX_COUNT);
-    gfx->fillRect(0, 312, 466, 154, gNight ? UI_BG_NIGHT : UI_BG_DAY);
+    gfx->fillRect(0, 312, LCD_WIDTH, LCD_HEIGHT - 312, gNight ? UI_BG_NIGHT : UI_BG_DAY);
     gfx->setTextColor(inkColor());
     gfx->setTextSize(2);
     gfx->setCursor(CX - strlen(reg) * 6, 344);
@@ -3191,7 +3178,7 @@ void render() {
       gfx->setTextSize(2);
       gfx->setCursor(CX - (int)strlen(away) * 6, PET_CY);
       gfx->print(away);
-      gfx->fillRect(0, 312, 466, 154, gNight ? UI_BG_NIGHT : UI_BG_DAY);
+      gfx->fillRect(0, 312, LCD_WIDTH, LCD_HEIGHT - 312, gNight ? UI_BG_NIGHT : UI_BG_DAY);
       drawBars();
       drawButtons();
     } else {
@@ -3201,7 +3188,7 @@ void render() {
       drawBath();
       drawPoops();
       // panel inferior: base limpia para barras y botones sobre el paisaje
-      gfx->fillRect(0, 312, 466, 154, gNight ? UI_BG_NIGHT : UI_BG_DAY);
+      gfx->fillRect(0, 312, LCD_WIDTH, LCD_HEIGHT - 312, gNight ? UI_BG_NIGHT : UI_BG_DAY);
       drawBars();
       drawButtons();
       drawCelebration();
@@ -3293,7 +3280,7 @@ void startGame() {
   gameMisses = 0;
   gameNewHi = false;
   hitTime = 0;
-  gamePetX = 233;
+  gamePetX = CX;
   respawnBall();
 }
 
@@ -3518,7 +3505,7 @@ void drawGameScene() {
   else             { top = C565(0xc7, 0x5a, 0x4a); bot = C565(0xf0, 0xae, 0x64); }
   int hor = 376;
   for (int y = 0; y < hor; y += 4)
-    gfx->fillRect(0, y, 466, 4, lerp565(top, bot, y, hor));
+    gfx->fillRect(0, y, LCD_WIDTH, 4, lerp565(top, bot, y, hor));
   if (night)
     for (auto &st : STARS) gfx->fillRect(st[0], st[1], 4, 4, UI_WHITE);
   uint8_t bio = pet.isEgg() ? 0 : DEX_TBL[pet.speciesId].biome;
@@ -3528,11 +3515,11 @@ void drawGameScene() {
   // profundidad + textura granulada, para que los minijuegos no lean como un
   // escenario mas plano que el resto del juego
   uint16_t soilHaze = lerp565(soil, bot, 3, 16);
-  int groundH = 466 - hor;
+  int groundH = LCD_HEIGHT - hor;
   for (int i = 0; i < 3; i++) {
     int by = hor + i * groundH / 3;
     int bh = groundH / 3 + 1;
-    gfx->fillRect(0, by, 466, bh, lerp565(soilHaze, soil, i, 2));
+    gfx->fillRect(0, by, LCD_WIDTH, bh, lerp565(soilHaze, soil, i, 2));
   }
   uint16_t fleckLight = lerp565(soil, UI_WHITE, 3, 16);
   uint16_t fleckDark = lerp565(soil, C565(0x10, 0x18, 0x20), night ? 8 : 5, 16);
@@ -4898,7 +4885,7 @@ void renderBattle() {
   drawBattleBack();
   // the lower band stays flat so the move grid and the HP text keep their
   // contrast against it
-  gfx->fillRect(0, 254, 466, 212, UI_BG_DAY);
+  gfx->fillRect(0, 254, LCD_WIDTH, LCD_HEIGHT - 254, UI_BG_DAY);
 
   // x=82 not 58: at y=60 the round bezel starts around x=77, and a longer
   // name like BLASTOISE was losing its first characters off the edge
@@ -7083,8 +7070,8 @@ static void menuRowLabel(int i, char *out, size_t n) {
 void drawMenu() {
   // dim the game behind the panel so the overlay reads as modal, and so it is
   // obvious that tapping the darkened area is a way out
-  for (int y = 0; y < 466; y += 2)
-    gfx->drawFastHLine(0, y, 466, gNight ? 0x0000 : 0x2104);
+  for (int y = 0; y < LCD_HEIGHT; y += 2)
+    gfx->drawFastHLine(0, y, LCD_WIDTH, gNight ? 0x0000 : 0x2104);
 
   gfx->fillRoundRect(MENU_X, MENU_Y, MENU_W, MENU_H, 18, UI_WHITE);
   gfx->drawRoundRect(MENU_X, MENU_Y, MENU_W, MENU_H, 18, UI_INK);
@@ -7126,8 +7113,8 @@ static uint8_t trainPct(uint8_t cur, uint8_t cap) {
 }
 
 void renderTrain() {
-  for (int y = 0; y < 466; y += 2)
-    gfx->drawFastHLine(0, y, 466, gNight ? 0x0000 : 0x2104);
+  for (int y = 0; y < LCD_HEIGHT; y += 2)
+    gfx->drawFastHLine(0, y, LCD_WIDTH, gNight ? 0x0000 : 0x2104);
 
   gfx->fillRoundRect(TRAIN_X, TRAIN_Y, TRAIN_W, TRAIN_H, 18, UI_WHITE);
   gfx->drawRoundRect(TRAIN_X, TRAIN_Y, TRAIN_W, TRAIN_H, 18, UI_INK);
@@ -7209,8 +7196,8 @@ void renderTrain() {
 // since it is the same shape -- a modal panel with a title and a few rows,
 // closed by tapping outside it. Nothing inside is tappable.
 void renderInventory() {
-  for (int y = 0; y < 466; y += 2)
-    gfx->drawFastHLine(0, y, 466, gNight ? 0x0000 : 0x2104);
+  for (int y = 0; y < LCD_HEIGHT; y += 2)
+    gfx->drawFastHLine(0, y, LCD_WIDTH, gNight ? 0x0000 : 0x2104);
 
   gfx->fillRoundRect(TRAIN_X, TRAIN_Y, TRAIN_W, TRAIN_H, 18, UI_WHITE);
   gfx->drawRoundRect(TRAIN_X, TRAIN_Y, TRAIN_W, TRAIN_H, 18, UI_INK);
@@ -7249,8 +7236,8 @@ void inventoryTap(int16_t x, int16_t y) {
 #define EXPED_BTN_Y(i) (TRAIN_Y + 74 + (i) * (EXPED_BTN_H + EXPED_BTN_GAP))
 
 void renderExpedition() {
-  for (int y = 0; y < 466; y += 2)
-    gfx->drawFastHLine(0, y, 466, gNight ? 0x0000 : 0x2104);
+  for (int y = 0; y < LCD_HEIGHT; y += 2)
+    gfx->drawFastHLine(0, y, LCD_WIDTH, gNight ? 0x0000 : 0x2104);
 
   gfx->fillRoundRect(TRAIN_X, TRAIN_Y, TRAIN_W, TRAIN_H, 18, UI_WHITE);
   gfx->drawRoundRect(TRAIN_X, TRAIN_Y, TRAIN_W, TRAIN_H, 18, UI_INK);
@@ -7543,7 +7530,7 @@ void renderParty() {
     gfx->drawRoundRect(BOXBTN_X, BOXBTN_Y, BOXBTN_W, BOXBTN_H, 10, UI_INK);
     gfx->setTextColor(UI_INK);
     gfx->setTextSize(2);
-    gfx->setCursor(233 - (int)strlen(bl) * 6, BOXBTN_Y + 12);
+    gfx->setCursor(CX - (int)strlen(bl) * 6, BOXBTN_Y + 12);
     gfx->print(bl);
   }
 
@@ -7848,7 +7835,7 @@ void drawCeremony() {
   if (panic) {
     // final triste: penumbra azulada + lluvia
     for (int i = 0; i < 46; i++) {
-      int rx = (i * 47 + now / 3) % 466;
+      int rx = (i * 47 + now / 3) % LCD_WIDTH;
       int ry = (i * 91 + now / 2) % 470;
       gfx->drawLine(rx, ry, rx - 3, ry + 12, C565(0x6a, 0x84, 0xb0));
     }
@@ -7877,7 +7864,7 @@ void drawCeremony() {
     gfx->drawCircle(CX, gcy, r, C565(0xff, 0xdf, 0x8a));
   }
   for (int i = 0; i < 16; i++) {
-    int px = (i * 71 + 28) % 466;
+    int px = (i * 71 + 28) % LCD_WIDTH;
     int py = 410 - (int)((now / 8 + i * 70) % 360);   // suben y reaparecen abajo
     if (py < 30) continue;
     if (i % 4 == 0) drawMap(SPR_HEART, 32, px - 8, py - 8, 1, false);  // corazoncito

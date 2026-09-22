@@ -1,10 +1,11 @@
 # Portage vers la Waveshare ESP32-S3 2.8inch Capacitive Touch Round Display
 
-**PREMIER BRING-UP RÉEL FAIT (2026-09-19/20).** L'écran affiche désormais le
-jeu. Contrairement à la première version de ce document, ce n'est plus un
-portage jamais testé -- voir la section "Bring-up réel" plus bas pour ce qui a
-été trouvé et corrigé, et ce qui reste ouvert (l'image "saute" encore par
-moments, cause probablement architecturale, pas un registre à corriger).
+**BRING-UP RÉEL TERMINÉ (2026-09-19 à 22).** L'écran affiche le jeu
+correctement, jusqu'aux bords, et la carte SD fonctionne. Contrairement à la
+première version de ce document, ce n'est plus un portage jamais testé --
+voir la section "Bring-up réel" plus bas pour l'historique complet, y compris
+plusieurs fausses pistes matérielles avant de trouver la vraie cause du
+dernier artefact visuel (un bug de code, pas de driver -- point 10).
 
 ## Bring-up réel (2026-09-19/20) -- ce qui a vraiment été corrigé
 
@@ -93,25 +94,47 @@ commentaires du code semblent se contredire dans l'historique git) :
    zéro. Réglé sur 10 MHz (meilleur taux de rafraîchissement pour un
    résultat identique à 8 MHz).
 
-**Ce qui reste ouvert :** même après le Canvas et le plateau d'horloge à
-10 MHz, un artefact visuel localisé et RÉPÉTABLE persiste **spécifiquement
-sur le bord droit et le bord bas** de l'écran, et semble s'aggraver après
-certaines actions. Sa persistance IDENTIQUE de 8 à 30 MHz (une fois le
-Canvas en place) suggère que ce n'est peut-être pas un pur probleme
-d'horloge marginale -- si ça l'était, on s'attendrait à une variation avec
-la frequence, pas un résultat identique. Hypothèses non testées :
-- Les valeurs de porches HSYNC/VSYNC ont été vérifiées NUMÉRIQUEMENT contre
-  la démo officielle (mêmes chiffres), mais jamais contre le datasheet du
-  panneau lui-même -- il est possible que cette révision précise du panneau
-  ait besoin de valeurs différentes de celles de la démo (calibrées pour un
-  lot différent), ce qui pourrait expliquer une déviation localisée
-  bord-par-bord plutôt qu'un decalage uniforme de l'image entière.
-- Écrire un pilote RGB personnalisé contournant entièrement `Arduino_GFX`
-  (via l'API `esp_lcd_rgb_panel` directement) permettrait de choisir
-  `LCD_CLK_SRC_PLL240M` comme l'officiel, d'ajuster les porches librement,
-  et éventuellement d'ajouter un vrai double buffer matériel (`num_fbs=2`
-  avec bascule au VSYNC) -- un chantier separe et substantiel, pas un
-  réglage rapide.
+10. **La VRAIE cause du "décalage bord droit/bas" : ce n'était pas du tout un
+    problème d'écran.** Après le Canvas, le plateau d'horloge à 10 MHz, ET un
+    pilote RGB personnalisé (`TamaRgbPanel`, point 11 ci-dessous) forçant le
+    vrai `LCD_CLK_SRC_PLL240M` de l'officiel -- ce qui a fait ZÉRO différence
+    sur l'artefact -- l'hypothèse "timing/horloge" a été définitivement
+    écartée : rien côté driver ne changeait le résultat. La vraie cause,
+    trouvée en cherchant le nombre `466` (la taille de panneau des cartes
+    1.75/1.43) dans le code de décor du jeu : `drawScene()`, `drawGameScene()`,
+    `drawMenu()`, l'animation de fin de vie et plusieurs autres fonctions
+    avaient LITTÉRALEMENT `466` écrit en dur dans des dizaines d'appels
+    `fillRect`/`drawFastHLine`/rebouclages modulo, au lieu des macros
+    `LCD_WIDTH`/`LCD_HEIGHT` (qui valent 480 sur cette carte). Résultat :
+    chaque fond/dégradé/ligne dessiné s'arrêtait 14 pixels avant le vrai bord
+    droit et le vrai bord bas du panneau de 480x480, laissant ce qu'il y
+    avait AVANT (contenu d'un autre écran, ou rien) visible dans cette bande
+    -- exactement "décalage bizarre à droite et en bas, qui change selon
+    l'écran affiché". `CX`/`CY` (centre de l'écran) souffraient du même mal,
+    fixés à `233` (=466/2) au lieu de `LCD_WIDTH/2`/`LCD_HEIGHT/2`, décalant
+    de 7 px tout ce qui s'y référait (soleil couchant, position du bicho au
+    repos, plusieurs boutons). Tout remplacé par les macros correspondantes
+    -- **aucun changement pour 1.75/1.43** (466/2 = 233 de toute façon),
+    correctif uniquement actif sur cette carte. Confirmé résolu sur la carte
+    réelle. La leçon : des heures de debug matériel (CS, COLMOD, polarité
+    HSYNC/VSYNC, source d'horloge, polarité PCLK) ont fini par ISOLER le vrai
+    bug en éliminant méthodiquement toute cause côté driver -- mais le bug
+    lui-même était un bête littéral copié-collé jamais paramétré par carte,
+    exactement le piège "une règle qui suppose une seule taille de panneau"
+    que ce projet documente déjà ailleurs pour d'autres constantes.
+11. **Pilote RGB personnalisé conservé malgré tout.** `TamaRgbPanel`
+    (`rgb28round.h/.cpp`) n'était pas la cause du bug ci-dessus, mais reste en
+    place : il appelle `esp_lcd_new_rgb_panel()` directement avec
+    `LCD_CLK_SRC_PLL240M` (comme l'officiel, contrairement à
+    `Arduino_ESP32RGBPanel` de la bibliothèque externe qui fige
+    `LCD_CLK_SRC_DEFAULT`/PLL160M sans l'exposer), et n'implémente que
+    `Arduino_G` (pas le `Arduino_GFX` complet) puisque ce `gfx` est toujours
+    enveloppé dans un `Arduino_Canvas` -- rien n'appelle jamais autre chose
+    que `draw16bitRGBBitmap()` dessus. Plus petit, plus simple à maintenir,
+    et plus fidèle à l'officiel que la bibliothèque générique.
+
+**Statut : bring-up considéré terminé.** Écran stable, SD fonctionnelle,
+décor correctement dessiné jusqu'aux bords. Rien d'ouvert de connu à ce jour.
 
 ## Version originale de ce document (avant tout bring-up matériel)
 
